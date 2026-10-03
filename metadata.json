@@ -1,0 +1,7 @@
+{
+  "name": "MediClinic Commerce ERP",
+  "description": "Multi-branch clinic retail ERP, inventory batch tracking, POS billing, stock ledger, and customer commerce portal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
