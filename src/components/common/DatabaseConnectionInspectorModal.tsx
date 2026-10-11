@@ -24,12 +24,14 @@ interface DatabaseConnectionInspectorModalProps {
   isOpen: boolean;
   onClose: () => void;
   onOpenSqlServerManager?: (tab?: 'schema' | 'connection' | 'migrations' | 'notifications' | 'sync' | 'cloud') => void;
+  onNavigate?: (tab: string) => void;
 }
 
 export const DatabaseConnectionInspectorModal: React.FC<DatabaseConnectionInspectorModalProps> = ({
   isOpen,
   onClose,
-  onOpenSqlServerManager
+  onOpenSqlServerManager,
+  onNavigate
 }) => {
   const [status, setStatus] = useState<SqlServerStatus>(() => localSqlServerService.getStatus());
   const [config, setConfig] = useState<SqlServerConfig>(() => localSqlServerService.getConfig());
@@ -390,6 +392,18 @@ export const DatabaseConnectionInspectorModal: React.FC<DatabaseConnectionInspec
               </li>
             </ol>
             <div className="pt-2 flex flex-wrap gap-2">
+              {onNavigate && (
+                <button
+                  onClick={() => {
+                    onNavigate('sql-studio');
+                    onClose();
+                  }}
+                  className="px-3.5 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-700 text-white font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <Terminal className="w-3.5 h-3.5" />
+                  <span>Open Live SQL Query Studio &amp; Data Fetcher</span>
+                </button>
+              )}
               <button
                 onClick={() => downloadStandaloneSqlBridgeInstaller(config)}
                 className="px-3 py-1.5 rounded-lg bg-teal-800 hover:bg-teal-900 text-white font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs"

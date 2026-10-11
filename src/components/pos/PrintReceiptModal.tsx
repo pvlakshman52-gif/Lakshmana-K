@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { SalesHeader, Location } from '../../types/erp';
-import { Printer, Share2, X, CheckCircle, FileText } from 'lucide-react';
+import { Printer, Share2, X, CheckCircle, FileText, AlertTriangle } from 'lucide-react';
 
 interface PrintReceiptModalProps {
   sale: SalesHeader | null;
@@ -13,14 +13,22 @@ export const PrintReceiptModal: React.FC<PrintReceiptModalProps> = ({ sale, loca
 
   if (!sale) return null;
 
+  // Safe line items array protection (never assume sale.details is populated)
+  const safeDetails = Array.isArray(sale.details) ? sale.details : [];
+  const hasLineItems = safeDetails.length > 0;
+
   const handlePrint = () => {
     window.print();
   };
 
   const handleWhatsAppShare = () => {
-    const phone = sale.customerPhone.replace(/[^0-9]/g, '');
-    const itemsText = sale.details
-      .map(d => `• ${d.productName} (Qty: ${d.quantity}) - ₹${d.amount}`)
+    if (!hasLineItems) {
+      return;
+    }
+
+    const phone = (sale.customerPhone || '').replace(/[^0-9]/g, '');
+    const itemsText = safeDetails
+      .map(d => `• ${d.productName || 'Product'} (Qty: ${d.quantity || 1}) - ₹${Number(d.amount ?? 0).toFixed(2)}`)
       .join('%0A');
 
     const message = 
@@ -29,11 +37,11 @@ export const PrintReceiptModal: React.FC<PrintReceiptModalProps> = ({ sale, loca
       `Date: ${sale.saleDate}%0A` +
       `Customer: ${sale.customerName}%0A%0A` +
       `*Items:*%0A${itemsText}%0A%0A` +
-      `Gross Total: ₹${sale.grossAmount}%0A` +
-      (sale.courierCharges && sale.courierCharges > 0 ? `Courier / Delivery: ₹${sale.courierCharges}%0A` : '') +
-      `Discount: ₹${sale.discountAmount}%0A` +
-      `*Net Payable: ₹${sale.netAmount}*%0A` +
-      `Paid via: ${sale.paymentMode} ${sale.upiReferenceNo ? `(Ref: ${sale.upiReferenceNo})` : ''}%0A%0A` +
+      `Gross Total: ₹${Number(sale.grossAmount ?? sale.netAmount).toFixed(2)}%0A` +
+      (sale.courierCharges && sale.courierCharges > 0 ? `Courier / Delivery: ₹${Number(sale.courierCharges).toFixed(2)}%0A` : '') +
+      `Discount: ₹${Number(sale.discountAmount ?? 0).toFixed(2)}%0A` +
+      `*Net Payable: ₹${Number(sale.netAmount).toFixed(2)}*%0A` +
+      `Paid via: ${sale.paymentMode || 'Cash'} ${sale.upiReferenceNo ? `(Ref: ${sale.upiReferenceNo})` : ''}%0A%0A` +
       `Thank you for visiting! For consultations or refills, call ${location?.phone || ''}`;
 
     window.open(`https://wa.me/${phone ? `91${phone}` : ''}?text=${message}`, '_blank');
@@ -48,6 +56,15 @@ export const PrintReceiptModal: React.FC<PrintReceiptModalProps> = ({ sale, loca
           <div className="flex items-center gap-2">
             <CheckCircle className="w-5 h-5 text-emerald-600" />
             <h3 className="font-semibold text-slate-900 text-sm">Invoice Generated: {sale.invoiceNo}</h3>
+            {sale.syncStatus === 'SyncedSQL' ? (
+              <span className="px-2 py-0.5 text-[10px] bg-emerald-100 text-emerald-800 rounded-full font-mono font-bold">
+                SQL Synced
+              </span>
+            ) : sale.syncStatus === 'OfflineSaved' ? (
+              <span className="px-2 py-0.5 text-[10px] bg-amber-100 text-amber-800 rounded-full font-mono font-bold" title="Saved locally in offline cache. Will synchronize when connected to SQL Server bridge.">
+                Offline Saved
+              </span>
+            ) : null}
           </div>
 
           <div className="flex items-center gap-2">
@@ -106,53 +123,78 @@ export const PrintReceiptModal: React.FC<PrintReceiptModalProps> = ({ sale, loca
                 </div>
               </div>
 
-              {/* Items Table */}
+              {/* Items Table / Warning for unverified historical records */}
               <div className="py-2.5 border-b border-dashed border-slate-400">
-                <div className="grid grid-cols-12 font-bold pb-1 text-[11px]">
-                  <div className="col-span-6">ITEM</div>
-                  <div className="col-span-2 text-right">QTY</div>
-                  <div className="col-span-4 text-right">AMT</div>
-                </div>
-
-                <div className="space-y-1.5 mt-1">
-                  {sale.details.map((item, idx) => (
-                    <div key={idx} className="grid grid-cols-12 text-[11px]">
-                      <div className="col-span-6 pr-1">
-                        <div className="font-sans font-medium line-clamp-1">{item.productName}</div>
-                        <div className="text-[9px] text-slate-500">Batch: {item.batchNumber}</div>
-                      </div>
-                      <div className="col-span-2 text-right tabular-nums">{item.quantity}</div>
-                      <div className="col-span-4 text-right tabular-nums">₹{item.amount.toFixed(2)}</div>
+                {hasLineItems ? (
+                  <>
+                    <div className="grid grid-cols-12 font-bold pb-1 text-[11px]">
+                      <div className="col-span-6">ITEM</div>
+                      <div className="col-span-2 text-right">QTY</div>
+                      <div className="col-span-4 text-right">AMT</div>
                     </div>
-                  ))}
-                </div>
+
+                    <div className="space-y-1.5 mt-1">
+                      {safeDetails.map((item, idx) => (
+                        <div key={idx} className="grid grid-cols-12 text-[11px]">
+                          <div className="col-span-6 pr-1">
+                            <div className="font-sans font-medium line-clamp-1 flex items-center gap-1">
+                              <span>{item.productName || 'Unverified Product'}</span>
+                              {item.isUnverified && (
+                                <span className="text-[8px] px-1 py-0.2 bg-amber-100 text-amber-800 rounded font-mono font-bold" title="Unverified field data">
+                                  UNVERIFIED
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[9px] text-slate-500">Batch: {item.batchNumber || 'N/A'}</div>
+                          </div>
+                          <div className="col-span-2 text-right tabular-nums">
+                            {item.quantity !== undefined && item.quantity !== null ? item.quantity : '-'}
+                          </div>
+                          <div className="col-span-4 text-right tabular-nums">
+                            {item.amount !== undefined && item.amount !== null ? `₹${Number(item.amount).toFixed(2)}` : 'Unverified'}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="p-2.5 bg-amber-50 border border-amber-300 rounded text-amber-950 text-[10px] space-y-1">
+                    <div className="flex items-center gap-1 font-bold text-amber-900">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                      <span>Unverified Itemised Details</span>
+                    </div>
+                    <p className="leading-tight font-sans">
+                      Historical line items are unavailable. The invoice header exists, but the itemised transaction details could not be verified. Reconciliation is required.
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* Financial Totals */}
               <div className="py-2.5 border-b border-dashed border-slate-400 space-y-1 text-[11px]">
                 <div className="flex justify-between text-slate-600">
                   <span>Gross Total</span>
-                  <span className="tabular-nums">₹{sale.grossAmount.toFixed(2)}</span>
+                  <span className="tabular-nums">₹{Number(sale.grossAmount ?? sale.netAmount).toFixed(2)}</span>
                 </div>
                 {sale.courierCharges !== undefined && sale.courierCharges > 0 && (
                   <div className="flex justify-between text-teal-800 font-semibold">
                     <span>Courier Charges</span>
-                    <span className="tabular-nums">+₹{sale.courierCharges.toFixed(2)}</span>
+                    <span className="tabular-nums">+₹{Number(sale.courierCharges).toFixed(2)}</span>
                   </div>
                 )}
-                {sale.discountAmount > 0 && (
+                {sale.discountAmount !== undefined && sale.discountAmount > 0 && (
                   <div className="flex justify-between text-rose-600">
                     <span>Discount</span>
-                    <span className="tabular-nums">-₹{sale.discountAmount.toFixed(2)}</span>
+                    <span className="tabular-nums">-₹{Number(sale.discountAmount).toFixed(2)}</span>
                   </div>
                 )}
                 <div className="flex justify-between font-bold text-sm pt-1 border-t border-slate-200">
                   <span>NET PAYABLE</span>
-                  <span className="tabular-nums">₹{sale.netAmount.toFixed(2)}</span>
+                  <span className="tabular-nums">₹{Number(sale.netAmount).toFixed(2)}</span>
                 </div>
                 <div className="flex justify-between text-[11px] text-slate-600 pt-0.5">
                   <span>Payment Mode</span>
-                  <span className="font-semibold">{sale.paymentMode}</span>
+                  <span className="font-semibold">{sale.paymentMode || 'Cash'}</span>
                 </div>
                 {sale.upiReferenceNo && (
                   <div className="text-[10px] text-slate-500">
@@ -162,7 +204,7 @@ export const PrintReceiptModal: React.FC<PrintReceiptModalProps> = ({ sale, loca
               </div>
 
               <div className="text-center pt-3 text-[10px] text-slate-500">
-                <p>Thank you for choosing {location?.locationName?.split(' ')[0]}!</p>
+                <p>Thank you for choosing {location?.locationName?.split(' ')[0] || 'MediClinic'}!</p>
                 <p className="mt-0.5 text-[9px]">Medicines/Cosmetics once sold are non-refundable.</p>
               </div>
             </div>
@@ -171,7 +213,7 @@ export const PrintReceiptModal: React.FC<PrintReceiptModalProps> = ({ sale, loca
             <div className="bg-white p-8 shadow-xs border border-slate-300 w-full text-slate-900 text-xs">
               <div className="flex justify-between items-start pb-4 border-b border-slate-300">
                 <div>
-                  <h2 className="text-base font-bold text-slate-900">{location?.locationName}</h2>
+                  <h2 className="text-base font-bold text-slate-900">{location?.locationName || 'MediClinic Derma Care'}</h2>
                   <p className="text-slate-600">{location?.address}</p>
                   <p className="text-slate-600">Phone: {location?.phone}</p>
                   {location?.gstin && <p className="text-slate-500">GSTIN: {location.gstin}</p>}
@@ -193,58 +235,88 @@ export const PrintReceiptModal: React.FC<PrintReceiptModalProps> = ({ sale, loca
                 </div>
                 <div className="text-right">
                   <span className="text-[10px] uppercase font-bold text-slate-400">Payment Information</span>
-                  <p className="font-semibold text-slate-800">Mode: {sale.paymentMode}</p>
+                  <p className="font-semibold text-slate-800">Mode: {sale.paymentMode || 'Cash'}</p>
                   {sale.upiReferenceNo && <p className="text-slate-600 text-[11px]">UPI Ref: {sale.upiReferenceNo}</p>}
-                  <p className="text-slate-500 text-[11px]">Billed by: {sale.createdBy}</p>
+                  <p className="text-slate-500 text-[11px]">Billed by: {sale.createdBy || 'Staff'}</p>
                 </div>
               </div>
 
-              <table className="w-full my-4 text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-300 text-slate-600 text-[11px]">
-                    <th className="py-2">#</th>
-                    <th className="py-2">Item Description</th>
-                    <th className="py-2">Batch No</th>
-                    <th className="py-2 text-right">Rate (₹)</th>
-                    <th className="py-2 text-right">Qty</th>
-                    <th className="py-2 text-right">Amount (₹)</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
-                  {sale.details.map((item, idx) => (
-                    <tr key={idx}>
-                      <td className="py-2 text-slate-400">{idx + 1}</td>
-                      <td className="py-2 font-sans font-medium text-slate-900">{item.productName}</td>
-                      <td className="py-2 text-slate-600">{item.batchNumber}</td>
-                      <td className="py-2 text-right tabular-nums">₹{item.rate.toFixed(2)}</td>
-                      <td className="py-2 text-right tabular-nums">{item.quantity}</td>
-                      <td className="py-2 text-right tabular-nums font-semibold">₹{item.amount.toFixed(2)}</td>
+              {hasLineItems ? (
+                <table className="w-full my-4 text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-300 text-slate-600 text-[11px]">
+                      <th className="py-2">#</th>
+                      <th className="py-2">Item Description</th>
+                      <th className="py-2">Batch No</th>
+                      <th className="py-2 text-right">Rate (₹)</th>
+                      <th className="py-2 text-right">Qty</th>
+                      <th className="py-2 text-right">Amount (₹)</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
+                    {safeDetails.map((item, idx) => (
+                      <tr key={idx} className={item.isUnverified ? 'bg-amber-50/50' : ''}>
+                        <td className="py-2 text-slate-400">{idx + 1}</td>
+                        <td className="py-2 font-sans font-medium text-slate-900">
+                          <div className="flex items-center gap-1.5">
+                            <span>{item.productName || 'Unverified Product'}</span>
+                            {item.isUnverified && (
+                              <span className="text-[9px] px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded font-mono font-bold">
+                                UNVERIFIED
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-2 text-slate-600">{item.batchNumber || 'N/A'}</td>
+                        <td className="py-2 text-right tabular-nums">
+                          {item.rate !== undefined && item.rate !== null ? `₹${Number(item.rate).toFixed(2)}` : '—'}
+                        </td>
+                        <td className="py-2 text-right tabular-nums">
+                          {item.quantity !== undefined && item.quantity !== null ? item.quantity : '—'}
+                        </td>
+                        <td className="py-2 text-right tabular-nums font-semibold">
+                          {item.amount !== undefined && item.amount !== null ? `₹${Number(item.amount).toFixed(2)}` : 'Unverified'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <div className="my-6 p-4 bg-amber-50 border border-amber-300 rounded-lg text-amber-950 space-y-1.5">
+                  <div className="flex items-center gap-2 font-bold text-amber-900 text-xs">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>Incomplete Itemised Record Notice</span>
+                  </div>
+                  <p className="text-xs leading-relaxed font-sans">
+                    Historical line items are unavailable. The invoice header exists, but the itemised transaction details could not be verified. Reconciliation is required.
+                  </p>
+                  <p className="text-[11px] text-amber-800 font-sans italic">
+                    Note: Financial totals below reflect the recorded ledger values from the sales header and have not been altered or fabricated.
+                  </p>
+                </div>
+              )}
 
               <div className="pt-4 border-t border-slate-300 flex justify-end">
                 <div className="w-64 space-y-1.5 font-mono text-xs">
                   <div className="flex justify-between text-slate-600">
                     <span>Gross Total:</span>
-                    <span>₹{sale.grossAmount.toFixed(2)}</span>
+                    <span>₹{Number(sale.grossAmount ?? sale.netAmount).toFixed(2)}</span>
                   </div>
                   {sale.courierCharges !== undefined && sale.courierCharges > 0 && (
                     <div className="flex justify-between text-teal-800 font-semibold">
                       <span>Courier Charges:</span>
-                      <span>+₹{sale.courierCharges.toFixed(2)}</span>
+                      <span>+₹{Number(sale.courierCharges).toFixed(2)}</span>
                     </div>
                   )}
-                  {sale.discountAmount > 0 && (
+                  {sale.discountAmount !== undefined && sale.discountAmount > 0 && (
                     <div className="flex justify-between text-rose-600">
                       <span>Discount:</span>
-                      <span>-₹{sale.discountAmount.toFixed(2)}</span>
+                      <span>-₹{Number(sale.discountAmount).toFixed(2)}</span>
                     </div>
                   )}
                   <div className="flex justify-between text-sm font-bold text-slate-900 pt-1 border-t border-slate-200">
                     <span>Net Amount:</span>
-                    <span>₹{sale.netAmount.toFixed(2)}</span>
+                    <span>₹{Number(sale.netAmount).toFixed(2)}</span>
                   </div>
                 </div>
               </div>
@@ -266,13 +338,26 @@ export const PrintReceiptModal: React.FC<PrintReceiptModalProps> = ({ sale, loca
 
         {/* Modal Actions Footer (hidden during print) */}
         <div className="no-print p-4 border-t border-slate-200 bg-white flex items-center justify-between">
-          <button
-            onClick={handleWhatsAppShare}
-            className="flex items-center gap-2 px-3 py-2 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition-colors"
-          >
-            <Share2 className="w-4 h-4" />
-            <span>WhatsApp Bill</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleWhatsAppShare}
+              disabled={!hasLineItems}
+              title={hasLineItems ? 'Send invoice to customer WhatsApp' : 'Itemised WhatsApp sharing is disabled because line item details are unavailable for this invoice'}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
+                hasLineItems 
+                  ? 'bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer' 
+                  : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+              }`}
+            >
+              <Share2 className="w-4 h-4" />
+              <span>{hasLineItems ? 'WhatsApp Bill' : 'WhatsApp Unavailable (Missing Items)'}</span>
+            </button>
+            {!hasLineItems && (
+              <span className="text-[10px] text-amber-700 hidden sm:inline" title="Item details unverified">
+                Itemised share disabled
+              </span>
+            )}
+          </div>
 
           <div className="flex items-center gap-2">
             <button

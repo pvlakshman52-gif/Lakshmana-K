@@ -56,17 +56,20 @@ import {
 } from '../../utils/sqlServerScriptGenerator';
 import { DatabaseNotification, DatabaseMigrationPatch } from '../../types/erp';
 import { downloadOpeningStockExcelTemplate } from '../../utils/excelImportUtils';
+import { localSqlServerService } from '../../services/localSqlService';
 
 interface SqlServerManagerModalProps {
   onClose: () => void;
   defaultTab?: 'schema' | 'connection' | 'migrations' | 'notifications' | 'sync' | 'cloud';
   onNavigateToOpeningStock?: () => void;
+  onNavigateToQueryStudio?: () => void;
 }
 
 export const SqlServerManagerModal: React.FC<SqlServerManagerModalProps> = ({
   onClose,
   defaultTab = 'schema',
-  onNavigateToOpeningStock
+  onNavigateToOpeningStock,
+  onNavigateToQueryStudio
 }) => {
   const { 
     currentUser, 
@@ -86,16 +89,20 @@ export const SqlServerManagerModal: React.FC<SqlServerManagerModalProps> = ({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   // Connection Parameters State
-  const [connectionParams, setConnectionParams] = useState<SqlServerConnectionParams>({
-    server: 'localhost\\SQLEXPRESS',
-    port: 1433,
-    database: 'MediClinic_ERP',
-    authType: 'SQL_AUTH',
-    user: 'sa',
-    password: '',
-    encrypt: false,
-    trustServerCertificate: true,
-    connectionTimeoutSeconds: 15
+  const [connectionParams, setConnectionParams] = useState<SqlServerConnectionParams>(() => {
+    const current = localSqlServerService.getStatus();
+    const config = localSqlServerService.getConfig();
+    return {
+      server: current.server || config.server || '(local)\\SQLEXPRESS',
+      port: config.port || 1433,
+      database: current.database || config.database || 'MediClinic_ERP',
+      authType: config.authType || 'WINDOWS_AUTH',
+      user: config.user || 'sa',
+      password: config.password || '',
+      encrypt: config.encrypt !== false,
+      trustServerCertificate: config.trustServerCertificate !== false,
+      connectionTimeoutSeconds: 15
+    };
   });
 
   const [bridgePort, setBridgePort] = useState<number>(5001);
@@ -720,6 +727,20 @@ export const SqlServerManagerModal: React.FC<SqlServerManagerModalProps> = ({
             <Cloud className={`w-4 h-4 shrink-0 ${activeTab === 'cloud' ? 'text-teal-200' : 'text-teal-700'}`} />
             <span>6. Future Cloud Migration</span>
           </button>
+
+          {onNavigateToQueryStudio && (
+            <button
+              onClick={() => {
+                onNavigateToQueryStudio();
+                onClose();
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-bold bg-teal-800 hover:bg-teal-900 text-white shadow-xs transition-all whitespace-nowrap cursor-pointer shrink-0 ml-auto"
+              title="Execute custom SQL queries on screen and fetch live records"
+            >
+              <Terminal className="w-4 h-4 text-teal-300" />
+              <span>Live Query Studio &amp; Fetch</span>
+            </button>
+          )}
         </div>
 
         {/* Content Body */}

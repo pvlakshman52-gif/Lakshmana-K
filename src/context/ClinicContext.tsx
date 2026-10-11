@@ -26,6 +26,16 @@ import {
   GoLiveResetOptions,
   DatabaseBackupRecord
 } from '../types/erp';
+import { 
+  BranchDataPackage, 
+  BranchImportRecord,
+  BranchOpenStockRecord,
+  ExportedSaleRecord,
+  ExportedSaleItemRecord,
+  ExportedCustomerRecord,
+  ExportedProductReference
+} from '../types/sync';
+import { branchSyncService } from '../services/branchSyncService';
 import {
   resolveProductSellingPrice,
   getFefoBatchesForProduct,
@@ -167,7 +177,7 @@ interface ClinicContextType {
     reason?: string
   ) => void;
   deleteStockBatch: (batchId: string, reason?: string) => void;
-  executeSale: (payload: SalePayload) => SalesHeader;
+  executeSale: (payload: SalePayload) => Promise<SalesHeader>;
   executeStockTransfer: (payload: TransferPayload) => void;
   executeStockAdjustment: (
     locationId: string,
@@ -235,6 +245,44 @@ interface ClinicContextType {
   downloadBackupFile: (backup: DatabaseBackupRecord) => void;
   restoreFromBackupRecord: (backupId: string) => boolean;
   deleteBackupRecord: (backupId: string) => void;
+
+  // Branch Data Synchronization & Table Structure Sync
+  importBranchDataPackage: (packageData: BranchDataPackage) => {
+    success: boolean;
+    importedSales: number;
+    importedItems: number;
+    importedCustomers: number;
+    skippedDuplicates: number;
+    message: string;
+  };
+  importBranchOpenStock: (
+    records: BranchOpenStockRecord[],
+    targetLocationId: string,
+    options?: { autoCreateProducts?: boolean; overwriteExisting?: boolean }
+  ) => {
+    success: boolean;
+    importedBatches: number;
+    updatedBatches: number;
+    createdProducts: number;
+    message: string;
+  };
+  importBranchProductSales: (
+    packageData: {
+      sales: ExportedSaleRecord[];
+      saleItems: ExportedSaleItemRecord[];
+      customers?: ExportedCustomerRecord[];
+      productsReference?: ExportedProductReference[];
+      branchCode: string;
+      branchName: string;
+    },
+    targetLocationId?: string
+  ) => {
+    success: boolean;
+    importedSales: number;
+    importedItems: number;
+    skippedDuplicates: number;
+    message: string;
+  };
 
   // Local Microsoft SQL Server Live Database State & Sync
   sqlServerStatus: SqlServerStatus;
@@ -456,8 +504,17 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
   });
   const [sales, setSales] = useState<SalesHeader[]>(() => {
-    const loaded = loadStored('sales', wasReset ? [] : INITIAL_SALES);
-    return (Array.isArray(loaded) && loaded.length > 0) ? loaded : INITIAL_SALES;
+    // Only load saved offline cache if present; do not artificially default to sample sales if store was cleared or clean
+    const loaded = loadStored<SalesHeader[]>('sales', wasReset ? [] : []);
+    if (Array.isArray(loaded) && loaded.length > 0) {
+      return loaded;
+    }
+    // Only in initial demo mode when no local storage exists at all and wasReset is false do we allow INITIAL_SALES
+    const hasExistingStore = typeof window !== 'undefined' && localStorage.getItem(STORAGE_KEY_PREFIX + 'sales') !== null;
+    if (hasExistingStore || wasReset) {
+      return [];
+    }
+    return INITIAL_SALES;
   });
   const [ledger, setLedger] = useState<StockMovementLedger[]>(() => deduplicateLedger(loadStored('ledger', wasReset ? [] : INITIAL_LEDGER)));
   const [transfers, setTransfers] = useState<StockTransfer[]>(() => loadStored('transfers', []));
@@ -483,7 +540,13 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [auditLogs, setAuditLogs] = useState<GoLiveAuditLog[]>(() => loadStored('audit_logs', []));
 
   // Current session states
-  const [currentUser, setCurrentUser] = useState<User>(() => loadStored('current_user', INITIAL_USERS[0]));
+  const [currentUser, setCurrentUser] = useState<User>(() => {
+    const stored = loadStored<User | null>('current_user', INITIAL_USERS[0]);
+    if (!stored || !stored.role || !stored.userId) {
+      return INITIAL_USERS[0];
+    }
+    return stored;
+  });
   const [selectedLocationId, setSelectedLocationIdState] = useState<string>(() => {
     const storedUser = loadStored<User>('current_user', INITIAL_USERS[0]);
     if (storedUser?.role === 'Admin') {
@@ -494,8 +557,8 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Guard location setting based on role: Admin can view ALL or specific branches; Staff is strictly locked to their assigned branch
   const setSelectedLocationId = (locId: string) => {
-    if (currentUser.role !== 'Admin') {
-      setSelectedLocationIdState(currentUser.locationId || 'LOC-HOS');
+    if (currentUser?.role !== 'Admin') {
+      setSelectedLocationIdState(currentUser?.locationId || 'LOC-HOS');
       return;
     }
     setSelectedLocationIdState(locId);
@@ -503,8 +566,8 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Enforce staff location locking whenever currentUser changes
   useEffect(() => {
-    if (currentUser.role !== 'Admin') {
-      const staffLoc = currentUser.locationId || 'LOC-HOS';
+    if (currentUser?.role !== 'Admin') {
+      const staffLoc = currentUser?.locationId || 'LOC-HOS';
       if (selectedLocationId !== staffLoc) {
         setSelectedLocationIdState(staffLoc);
       }
@@ -528,10 +591,11 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           localSqlServerService.fetchSales(),
           localSqlServerService.fetchCustomers()
         ]);
-        if (sqlProds && sqlProds.length > 0) setProducts(sqlProds);
-        if (sqlBatches && sqlBatches.length > 0) setBatches(sqlBatches);
-        if (sqlSales && sqlSales.length > 0) setSales(sqlSales);
-        if (sqlCustomers && sqlCustomers.length > 0) setCustomers(sqlCustomers);
+        if (sqlProds !== null) setProducts(sqlProds);
+        if (sqlBatches !== null) setBatches(sqlBatches);
+        // Distinguish successful empty sales list [] from failed request null
+        if (sqlSales !== null) setSales(sqlSales);
+        if (sqlCustomers !== null) setCustomers(sqlCustomers);
       } catch (err) {
         console.warn('Failed to refresh data from local SQL Server:', err);
       }
@@ -561,21 +625,28 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             localSqlServerService.fetchCustomers()
           ]);
           if (isMounted) {
-            if (sqlProds && sqlProds.length > 0) {
-              console.log(`[MediClinic ERP] Loaded ${sqlProds.length} products directly from local SQL Server.`);
-              setProducts(sqlProds);
+            if (sqlProds !== null && (sqlProds.length > 0 || !wasReset)) {
+              if (sqlProds.length > 0) {
+                console.log(`[MediClinic ERP] Loaded ${sqlProds.length} products directly from local SQL Server.`);
+                setProducts(sqlProds);
+              }
             }
-            if (sqlBatches && sqlBatches.length > 0) {
-              console.log(`[MediClinic ERP] Loaded ${sqlBatches.length} stock batches directly from local SQL Server.`);
-              setBatches(sqlBatches);
+            if (sqlBatches !== null && (sqlBatches.length > 0 || !wasReset)) {
+              if (sqlBatches.length > 0) {
+                console.log(`[MediClinic ERP] Loaded ${sqlBatches.length} stock batches directly from local SQL Server.`);
+                setBatches(sqlBatches);
+              }
             }
-            if (sqlSales && sqlSales.length > 0) {
-              console.log(`[MediClinic ERP] Loaded ${sqlSales.length} sales invoices directly from local SQL Server.`);
+            // Distinguish successful empty sales list from network failure null
+            if (sqlSales !== null) {
+              console.log(`[MediClinic ERP] Synchronized ${sqlSales.length} sales invoices from local SQL Server.`);
               setSales(sqlSales);
             }
-            if (sqlCustomers && sqlCustomers.length > 0) {
-              console.log(`[MediClinic ERP] Loaded ${sqlCustomers.length} customers directly from local SQL Server.`);
-              setCustomers(sqlCustomers);
+            if (sqlCustomers !== null && (sqlCustomers.length > 0 || !wasReset)) {
+              if (sqlCustomers.length > 0) {
+                console.log(`[MediClinic ERP] Loaded ${sqlCustomers.length} customers directly from local SQL Server.`);
+                setCustomers(sqlCustomers);
+              }
             }
           }
         } catch (readErr) {
@@ -1299,22 +1370,61 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   // Execute Point of Sale Bill
-  const executeSale = (payload: SalePayload): SalesHeader => {
+  const executeSale = async (payload: SalePayload): Promise<SalesHeader> => {
+    if (!payload.items || payload.items.length === 0) {
+      throw new Error('A sale requires at least one product line item.');
+    }
+
     const targetLocId = selectedLocationId === 'ALL' ? 'LOC-HOS' : selectedLocationId;
     const loc = locations.find(l => l.locationId === targetLocId) || locations[0];
+
+    // Pre-validate all line items: positive integer quantity, valid batch belonging to location, non-expired, sufficient stock
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+
+    for (let i = 0; i < payload.items.length; i++) {
+      const item = payload.items[i];
+      if (!item.productId || !String(item.productId).trim()) {
+        throw new Error(`Item ${i + 1} has an invalid product selection.`);
+      }
+      if (!item.batchId || !String(item.batchId).trim()) {
+        throw new Error(`Item ${i + 1} does not have an assigned stock batch.`);
+      }
+      if (!Number.isInteger(item.quantity) || item.quantity <= 0) {
+        throw new Error(`Item ${i + 1} quantity must be a positive whole number (received: ${item.quantity}).`);
+      }
+      if (typeof item.rate !== 'number' || isNaN(item.rate) || item.rate < 0) {
+        throw new Error(`Item ${i + 1} has an invalid rate (received: ${item.rate}).`);
+      }
+
+      const foundBatch = batches.find(b => b.batchId === item.batchId);
+      if (!foundBatch) {
+        throw new Error(`Stock batch "${item.batchId}" not found in current inventory.`);
+      }
+      if (foundBatch.productId !== item.productId) {
+        throw new Error(`Stock batch "${foundBatch.batchNumber || item.batchId}" belongs to a different product.`);
+      }
+      if (foundBatch.locationId && foundBatch.locationId !== targetLocId) {
+        throw new Error(`Stock batch "${foundBatch.batchNumber || item.batchId}" belongs to branch "${foundBatch.locationId}", not current branch "${targetLocId}".`);
+      }
+      if (foundBatch.expiryDate) {
+        const expDate = new Date(foundBatch.expiryDate);
+        if (!isNaN(expDate.getTime()) && expDate < now) {
+          throw new Error(`Stock batch "${foundBatch.batchNumber || item.batchId}" expired on ${foundBatch.expiryDate}. Expired batches cannot be billed.`);
+        }
+      }
+      if (foundBatch.currentQuantity < item.quantity) {
+        throw new Error(`Insufficient stock for "${foundBatch.batchNumber || item.batchId}". Available: ${foundBatch.currentQuantity}, Requested: ${item.quantity}.`);
+      }
+    }
 
     // Generate location invoice sequence e.g. HOS-000019 or HUB-000012
     const currentSeq = loc.nextInvoiceSeq || 1;
     const invoiceNo = `${loc.locationCode}-${String(currentSeq).padStart(6, '0')}`;
-
-    // Update location sequence counter
-    setLocations(prev =>
-      prev.map(l => l.locationId === loc.locationId ? { ...l, nextInvoiceSeq: currentSeq + 1 } : l)
-    );
+    const saleId = generateUniqueId('SALE');
 
     let grossAmount = 0;
     let totalCost = 0;
-    const saleId = generateUniqueId('SALE');
     const saleDetails: SalesDetail[] = [];
     const newLedgerEntries: StockMovementLedger[] = [];
 
@@ -1372,11 +1482,12 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
     });
 
-    setBatches(updatedBatches);
-
     const courierFee = Number(payload.courierCharges) || 0;
     const netAmount = Math.max(0, grossAmount + courierFee - (payload.discountAmount || 0));
     const totalProfit = netAmount - totalCost;
+
+    // Check if SQL Server is currently connected
+    const isSqlLive = localSqlServerService.getStatus().connected;
 
     const newSaleHeader: SalesHeader = {
       saleId,
@@ -1395,19 +1506,29 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       totalProfit,
       createdBy: currentUser.fullName,
       createdDate: new Date().toISOString(),
-      details: saleDetails
+      details: saleDetails,
+      syncStatus: isSqlLive ? 'SyncedSQL' : 'OfflineSaved'
     };
 
+    // If SQL Server is connected, await atomic backend transaction first
+    if (isSqlLive) {
+      const sqlResult = await localSqlServerService.writeSale(newSaleHeader);
+      if (!sqlResult.success) {
+        throw new Error(sqlResult.error || 'SQL Server transaction failed. Sale was not committed to database.');
+      }
+      newSaleHeader.syncStatus = 'SyncedSQL';
+    } else {
+      // Offline mode: mark as offline cached
+      newSaleHeader.syncStatus = 'OfflineSaved';
+    }
+
+    // Only update local React state and advance invoice counter once the sale has been validated & saved
+    setLocations(prev =>
+      prev.map(l => l.locationId === loc.locationId ? { ...l, nextInvoiceSeq: currentSeq + 1 } : l)
+    );
+    setBatches(updatedBatches);
     setSales(prev => [newSaleHeader, ...prev]);
     setLedger(prev => deduplicateLedger([...newLedgerEntries, ...prev]));
-
-    // Asynchronously write to local Microsoft SQL Server database in real time
-    localSqlServerService.writeSale(newSaleHeader).catch(err => {
-      console.warn('Asynchronous SQL Server write for sale deferred:', err);
-    });
-    newLedgerEntries.forEach(entry => {
-      localSqlServerService.writeLedger(entry).catch(err => console.warn('SQL ledger write error:', err));
-    });
 
     // Update customer loyalty points (1 point per ₹100 spent)
     if (payload.customerId && payload.customerId !== 'CUST-005') {
@@ -2329,6 +2450,489 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setBackups(prev => prev.filter(b => b.backupId !== backupId));
   };
 
+  /**
+   * ATOMIC BRANCH DATA PACKAGE IMPORT:
+   * Safely imports branch sales, items, customers, and stock movements.
+   * - Preserves source branch identity permanently (e.g. HUB)
+   * - Prevents duplicate sales or overwriting existing Hospete data
+   * - Idempotent and logged to audit trail
+   */
+  const importBranchDataPackage = (packageData: BranchDataPackage) => {
+    const { 
+      manifest, 
+      sales: incomingSales, 
+      saleItems: incomingItems, 
+      customers: incomingCustomers, 
+      stockMovements: incomingMovements, 
+      productsReference 
+    } = packageData;
+
+    // 1. Resolve or Register source location
+    let targetLoc = locations.find(
+      l => l.locationCode.toUpperCase() === manifest.branchCode.toUpperCase()
+    );
+    if (!targetLoc) {
+      targetLoc = {
+        locationId: `LOC-${manifest.branchCode.toUpperCase()}`,
+        locationCode: manifest.branchCode.toUpperCase(),
+        locationName: manifest.branchName,
+        address: `${manifest.branchName} Branch Office`,
+        phone: '+91 8000-000000',
+        isActive: true,
+        createdDate: new Date().toISOString().split('T')[0],
+        nextInvoiceSeq: 1
+      };
+      setLocations(prev => [...prev, targetLoc!]);
+    }
+    const targetLocationId = targetLoc.locationId;
+
+    // 2. Map existing sales to prevent duplicates
+    const existingSaleIds = new Set(sales.map(s => s.saleId));
+    const existingGlobalIds = new Set(
+      sales.map(s => s.globalSaleId || `${s.locationId}_${s.saleId}`)
+    );
+
+    // Group incoming items by saleId
+    const itemsBySaleId = new Map<string, typeof incomingItems>();
+    incomingItems.forEach(item => {
+      const list = itemsBySaleId.get(item.saleId) || [];
+      list.push(item);
+      itemsBySaleId.set(item.saleId, list);
+    });
+
+    const newSalesToAdd: SalesHeader[] = [];
+    let skippedDuplicates = 0;
+
+    incomingSales.forEach(inSale => {
+      const globalId = inSale.globalSaleId || `${manifest.branchCode}_${inSale.saleId}`;
+      if (existingGlobalIds.has(globalId) || existingSaleIds.has(inSale.saleId)) {
+        skippedDuplicates++;
+        return;
+      }
+
+      const saleItemsForThisSale = itemsBySaleId.get(inSale.saleId) || [];
+      const details: SalesDetail[] = saleItemsForThisSale.map(it => ({
+        saleDetailId: it.saleDetailId || generateUniqueId('SD'),
+        globalSaleItemId: it.globalSaleItemId,
+        saleId: inSale.saleId,
+        batchId: it.batchId || 'IMPORTED-BTH',
+        productId: it.productId,
+        productName: it.productName,
+        batchNumber: it.batchNumber || 'IMPORTED-BTH',
+        quantity: it.quantity,
+        rate: it.rate,
+        amount: it.amount,
+        costPrice: it.costPrice || 0,
+        profit: it.profit || 0
+      }));
+
+      newSalesToAdd.push({
+        saleId: inSale.saleId,
+        globalSaleId: globalId,
+        sourceBranchCode: manifest.branchCode,
+        invoiceNo: inSale.invoiceNo,
+        locationId: targetLocationId, // Permanent source branch identity
+        customerId: inSale.customerId,
+        customerName: inSale.customerName,
+        customerPhone: inSale.customerPhone,
+        saleDate: inSale.saleDate,
+        paymentMode: inSale.paymentMode as any,
+        upiReferenceNo: inSale.upiReferenceNo,
+        discountAmount: inSale.discountAmount || 0,
+        grossAmount: inSale.grossAmount || 0,
+        courierCharges: inSale.courierCharges || 0,
+        netAmount: inSale.netAmount || 0,
+        totalProfit: inSale.totalProfit || 0,
+        createdBy: inSale.createdBy || 'Branch Sync',
+        createdDate: inSale.createdDate || inSale.saleDate,
+        details
+      });
+    });
+
+    // 3. Auto-catalog any referenced products that don't exist yet
+    const existingProductCodes = new Set(products.map(p => p.productCode.toLowerCase()));
+    const newProductsToAdd: Product[] = [];
+    if (productsReference) {
+      productsReference.forEach(ref => {
+        if (!existingProductCodes.has(ref.productCode.toLowerCase())) {
+          existingProductCodes.add(ref.productCode.toLowerCase());
+          newProductsToAdd.push({
+            productId: ref.productId || generateUniqueId('PRD'),
+            productCode: ref.productCode,
+            productName: ref.productName,
+            categoryId: 'CAT-RETAIL',
+            costPrice: Math.round(ref.sellingPrice * 0.6),
+            sellingPrice: ref.sellingPrice,
+            reorderLevel: 10,
+            volumeSize: ref.volumeSize || 'Standard',
+            description: `Imported from ${manifest.branchName}`,
+            isActive: true,
+            createdDate: new Date().toISOString().split('T')[0]
+          });
+        }
+      });
+    }
+
+    // 4. Merge Customers
+    const existingPhoneNumbers = new Set(customers.map(c => c.phone));
+    const newCustomersToAdd: Customer[] = [];
+    if (incomingCustomers) {
+      incomingCustomers.forEach(c => {
+        if (c.phone && !existingPhoneNumbers.has(c.phone)) {
+          existingPhoneNumbers.add(c.phone);
+          newCustomersToAdd.push({
+            customerId: c.customerId || generateUniqueId('CUST'),
+            customerName: c.customerName,
+            phone: c.phone,
+            address: c.address || '',
+            email: c.email,
+            createdDate: c.createdDate || new Date().toISOString().split('T')[0],
+            loyaltyPoints: 0,
+            totalSpend: 0
+          });
+        }
+      });
+    }
+
+    // 5. Update State Atomically
+    if (newProductsToAdd.length > 0) {
+      setProducts(prev => [...prev, ...newProductsToAdd]);
+    }
+    if (newCustomersToAdd.length > 0) {
+      setCustomers(prev => [...prev, ...newCustomersToAdd]);
+    }
+    if (newSalesToAdd.length > 0) {
+      setSales(prev => [...newSalesToAdd, ...prev]);
+      // Also persist to local SQL server if connected
+      newSalesToAdd.forEach(s => {
+        localSqlServerService.writeSale(s).catch(e => console.warn('SQL write sale sync:', e));
+      });
+    }
+
+    // 6. Record in Import Audit History
+    const importRecord: BranchImportRecord = {
+      importId: `IMP-${Date.now().toString().slice(-6)}`,
+      exportId: manifest.exportId,
+      sourceBranchCode: manifest.branchCode,
+      sourceBranchName: manifest.branchName,
+      periodFrom: manifest.periodFrom,
+      periodTo: manifest.periodTo,
+      recordCountSummary: {
+        sales: newSalesToAdd.length,
+        saleItems: incomingItems.length,
+        payments: packageData.payments?.length || 0,
+        stockMovements: incomingMovements?.length || 0,
+        customers: newCustomersToAdd.length
+      },
+      totalNetAmount: manifest.totalNetAmount,
+      importedAt: new Date().toLocaleString(),
+      importedBy: currentUser.fullName,
+      status: 'Imported'
+    };
+    branchSyncService.addImportHistory(importRecord);
+
+    return {
+      success: true,
+      importedSales: newSalesToAdd.length,
+      importedItems: incomingItems.length,
+      importedCustomers: newCustomersToAdd.length,
+      skippedDuplicates,
+      message: `Successfully imported ${newSalesToAdd.length} sales from ${manifest.branchName} (${manifest.periodFrom} to ${manifest.periodTo}).`
+    };
+  };
+
+  // -------------------------------------------------------------------------
+  // IMPORT BRANCH OPEN STOCK & SYNC TO TABLES (ProductMaster, Batches, Movements)
+  // -------------------------------------------------------------------------
+  const importBranchOpenStock = (
+    records: BranchOpenStockRecord[],
+    targetLocationId: string,
+    options?: { autoCreateProducts?: boolean; overwriteExisting?: boolean }
+  ) => {
+    // 1. Resolve Target Location
+    const targetLoc = locations.find(l => l.locationId === targetLocationId) || 
+      (selectedLocationId !== 'ALL' ? locations.find(l => l.locationId === selectedLocationId) : null) ||
+      locations[0];
+    const locId = targetLoc.locationId;
+
+    // 2. Map existing products by code
+    const existingProductCodeMap = new Map(products.map(p => [p.productCode.toLowerCase(), p]));
+    const newProductsToAdd: Product[] = [];
+
+    // Auto-create missing products in product master table
+    if (options?.autoCreateProducts !== false) {
+      records.forEach(r => {
+        const codeKey = r.productCode.toLowerCase();
+        if (!existingProductCodeMap.has(codeKey)) {
+          const newProd: Product = {
+            productId: r.productId || generateUniqueId('PRD'),
+            productCode: r.productCode,
+            productName: r.productName,
+            categoryId: 'CAT-RETAIL',
+            costPrice: r.costPrice,
+            sellingPrice: r.sellingPrice,
+            reorderLevel: 10,
+            volumeSize: r.volumeSize || 'Standard',
+            description: `Imported from ${r.sourceBranchName || 'Branch'} Open Stock`,
+            isActive: true,
+            createdDate: new Date().toISOString().split('T')[0]
+          };
+          existingProductCodeMap.set(codeKey, newProd);
+          newProductsToAdd.push(newProd);
+        }
+      });
+    }
+
+    // 3. Map existing batches for target location
+    const existingBatchKeyMap = new Map<string, StockBatch>();
+    batches.forEach(b => {
+      if (b.locationId === locId) {
+        existingBatchKeyMap.set(`${b.productId}_${b.batchNumber.toLowerCase()}`, b);
+      }
+    });
+
+    const updatedBatches = [...batches];
+    const newBatchesToAdd: StockBatch[] = [];
+    const newMovementsToAdd: StockMovementLedger[] = [];
+    let updatedCount = 0;
+    let importedCount = 0;
+
+    records.forEach(r => {
+      const prod = existingProductCodeMap.get(r.productCode.toLowerCase());
+      const prodId = prod ? prod.productId : r.productId;
+      const batchKey = `${prodId}_${r.batchNumber.toLowerCase()}`;
+      const existingBatch = existingBatchKeyMap.get(batchKey);
+
+      if (existingBatch) {
+        if (options?.overwriteExisting) {
+          const idx = updatedBatches.findIndex(b => b.batchId === existingBatch.batchId);
+          if (idx !== -1) {
+            updatedBatches[idx] = {
+              ...updatedBatches[idx],
+              currentQuantity: r.currentQuantity,
+              costPrice: r.costPrice || updatedBatches[idx].costPrice,
+              sellingPrice: r.sellingPrice || updatedBatches[idx].sellingPrice,
+              expiryDate: r.expiryDate || updatedBatches[idx].expiryDate
+            };
+            updatedCount++;
+          }
+        }
+      } else {
+        const newBatchId = r.batchId || generateUniqueId('BTH');
+        const newBatch: StockBatch = {
+          batchId: newBatchId,
+          productId: prodId,
+          locationId: locId,
+          batchNumber: r.batchNumber,
+          expiryDate: r.expiryDate,
+          purchaseDate: r.purchaseDate || new Date().toISOString().split('T')[0],
+          purchaseInvoiceNo: r.purchaseInvoiceNo || `SYNC-${r.sourceBranchCode || 'OPEN'}`,
+          supplierName: r.supplierName || `Branch Sync (${r.sourceBranchName || 'Open Stock'})`,
+          quantityReceived: r.quantityReceived || r.currentQuantity,
+          currentQuantity: r.currentQuantity,
+          costPrice: r.costPrice,
+          sellingPrice: r.sellingPrice,
+          createdBy: currentUser.fullName,
+          createdDate: r.createdDate || new Date().toISOString().split('T')[0],
+          isOpeningStock: true,
+          openingBatchNumber: r.batchNumber
+        };
+        newBatchesToAdd.push(newBatch);
+        existingBatchKeyMap.set(batchKey, newBatch);
+        importedCount++;
+
+        newMovementsToAdd.push({
+          movementId: generateUniqueId('MOV'),
+          productId: prodId,
+          locationId: locId,
+          batchId: newBatchId,
+          movementType: 'Opening Stock',
+          referenceNo: `SYNC-OPEN-${r.sourceBranchCode || 'BRANCH'}-${r.batchNumber}`,
+          qtyIn: r.currentQuantity,
+          qtyOut: 0,
+          balanceQty: r.currentQuantity,
+          createdDate: new Date().toISOString().split('T')[0],
+          createdBy: `Branch Sync (${currentUser.fullName})`
+        });
+      }
+    });
+
+    // 4. Update React State & sync to SQL Server bridge
+    if (newProductsToAdd.length > 0) {
+      setProducts(prev => [...prev, ...newProductsToAdd]);
+      newProductsToAdd.forEach(p => localSqlServerService.writeProduct(p).catch(() => {}));
+    }
+
+    if (newBatchesToAdd.length > 0 || updatedCount > 0) {
+      if (options?.overwriteExisting) {
+        setBatches([...updatedBatches, ...newBatchesToAdd]);
+      } else {
+        setBatches(prev => [...prev, ...newBatchesToAdd]);
+      }
+      newBatchesToAdd.forEach(b => localSqlServerService.writeBatch(b).catch(() => {}));
+    }
+
+    if (newMovementsToAdd.length > 0) {
+      setLedger(prev => [...newMovementsToAdd, ...prev]);
+      newMovementsToAdd.forEach(m => localSqlServerService.writeLedger(m).catch(() => {}));
+    }
+
+    return {
+      success: true,
+      importedBatches: importedCount,
+      updatedBatches: updatedCount,
+      createdProducts: newProductsToAdd.length,
+      message: `Successfully synced ${importedCount} batches into ${targetLoc.locationName} (${newProductsToAdd.length} products auto-registered).`
+    };
+  };
+
+  // -------------------------------------------------------------------------
+  // IMPORT PRODUCT SALES & SYNC TO TABLES (SalesHeader, SalesDetail, Customers)
+  // -------------------------------------------------------------------------
+  const importBranchProductSales = (
+    packageData: {
+      sales: ExportedSaleRecord[];
+      saleItems: ExportedSaleItemRecord[];
+      customers?: ExportedCustomerRecord[];
+      productsReference?: ExportedProductReference[];
+      branchCode: string;
+      branchName: string;
+    },
+    targetLocationId?: string
+  ) => {
+    const { sales: inSales, saleItems: inItems, customers: inCustomers, productsReference: inRefs, branchCode, branchName } = packageData;
+
+    let targetLoc = targetLocationId ? locations.find(l => l.locationId === targetLocationId) : null;
+    if (!targetLoc) {
+      targetLoc = locations.find(l => l.locationCode.toUpperCase() === branchCode.toUpperCase()) || locations[0];
+    }
+
+    const existingProductCodeMap = new Map(products.map(p => [p.productCode.toLowerCase(), p]));
+    const newProductsToAdd: Product[] = [];
+    if (inRefs) {
+      inRefs.forEach(ref => {
+        if (!existingProductCodeMap.has(ref.productCode.toLowerCase())) {
+          const newProd: Product = {
+            productId: ref.productId || generateUniqueId('PRD'),
+            productCode: ref.productCode,
+            productName: ref.productName,
+            categoryId: 'CAT-RETAIL',
+            costPrice: Math.round(ref.sellingPrice * 0.6),
+            sellingPrice: ref.sellingPrice,
+            reorderLevel: 10,
+            volumeSize: ref.volumeSize || 'Standard',
+            description: `Imported from ${branchName}`,
+            isActive: true,
+            createdDate: new Date().toISOString().split('T')[0]
+          };
+          existingProductCodeMap.set(ref.productCode.toLowerCase(), newProd);
+          newProductsToAdd.push(newProd);
+        }
+      });
+    }
+
+    const existingPhoneMap = new Set(customers.map(c => c.phone));
+    const newCustomersToAdd: Customer[] = [];
+    if (inCustomers) {
+      inCustomers.forEach(c => {
+        if (c.phone && !existingPhoneMap.has(c.phone)) {
+          existingPhoneMap.add(c.phone);
+          newCustomersToAdd.push({
+            customerId: c.customerId || generateUniqueId('CUST'),
+            customerName: c.customerName,
+            phone: c.phone,
+            address: c.address || '',
+            email: c.email,
+            createdDate: c.createdDate || new Date().toISOString().split('T')[0],
+            loyaltyPoints: 0,
+            totalSpend: 0
+          });
+        }
+      });
+    }
+
+    const itemsBySaleId = new Map<string, ExportedSaleItemRecord[]>();
+    inItems.forEach(it => {
+      const list = itemsBySaleId.get(it.saleId) || [];
+      list.push(it);
+      itemsBySaleId.set(it.saleId, list);
+    });
+
+    const existingSaleIds = new Set(sales.map(s => s.saleId));
+    const existingGlobalIds = new Set(sales.map(s => s.globalSaleId || `${s.locationId}_${s.saleId}`));
+    const newSalesToAdd: SalesHeader[] = [];
+    let skippedDuplicates = 0;
+
+    inSales.forEach(s => {
+      const globalId = s.globalSaleId || `${branchCode}_${s.saleId}`;
+      if (existingGlobalIds.has(globalId) || existingSaleIds.has(s.saleId)) {
+        skippedDuplicates++;
+        return;
+      }
+
+      const saleItems = itemsBySaleId.get(s.saleId) || [];
+      const details: SalesDetail[] = saleItems.map(it => ({
+        saleDetailId: it.saleDetailId || generateUniqueId('SD'),
+        globalSaleItemId: it.globalSaleItemId,
+        saleId: s.saleId,
+        batchId: it.batchId || 'IMPORTED-BTH',
+        productId: it.productId,
+        productName: it.productName,
+        batchNumber: it.batchNumber || 'IMPORTED-BTH',
+        quantity: it.quantity,
+        rate: it.rate,
+        amount: it.amount,
+        costPrice: it.costPrice || 0,
+        profit: it.profit || 0
+      }));
+
+      newSalesToAdd.push({
+        saleId: s.saleId,
+        globalSaleId: globalId,
+        sourceBranchCode: branchCode,
+        invoiceNo: s.invoiceNo,
+        locationId: targetLoc!.locationId,
+        customerId: s.customerId,
+        customerName: s.customerName,
+        customerPhone: s.customerPhone,
+        saleDate: s.saleDate,
+        paymentMode: s.paymentMode as any,
+        upiReferenceNo: s.upiReferenceNo,
+        discountAmount: s.discountAmount || 0,
+        grossAmount: s.grossAmount || 0,
+        courierCharges: s.courierCharges || 0,
+        netAmount: s.netAmount || 0,
+        totalProfit: s.totalProfit || 0,
+        createdBy: s.createdBy || 'Branch Sales Sync',
+        createdDate: s.createdDate || s.saleDate,
+        details
+      });
+    });
+
+    if (newProductsToAdd.length > 0) {
+      setProducts(prev => [...prev, ...newProductsToAdd]);
+      newProductsToAdd.forEach(p => localSqlServerService.writeProduct(p).catch(() => {}));
+    }
+
+    if (newCustomersToAdd.length > 0) {
+      setCustomers(prev => [...prev, ...newCustomersToAdd]);
+      newCustomersToAdd.forEach(c => localSqlServerService.writeCustomer(c).catch(() => {}));
+    }
+
+    if (newSalesToAdd.length > 0) {
+      setSales(prev => [...newSalesToAdd, ...prev]);
+      newSalesToAdd.forEach(s => localSqlServerService.writeSale(s).catch(() => {}));
+    }
+
+    return {
+      success: true,
+      importedSales: newSalesToAdd.length,
+      importedItems: inItems.length,
+      skippedDuplicates,
+      message: `Successfully synced ${newSalesToAdd.length} invoices (${inItems.length} product lines) from ${branchName}.`
+    };
+  };
+
   return (
     <ClinicContext.Provider
       value={{
@@ -2408,6 +3012,9 @@ export const ClinicProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         downloadBackupFile,
         restoreFromBackupRecord,
         deleteBackupRecord,
+        importBranchDataPackage,
+        importBranchOpenStock,
+        importBranchProductSales,
         sqlServerStatus,
         refreshSqlServerData
       }}

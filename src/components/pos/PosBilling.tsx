@@ -73,6 +73,7 @@ export const PosBilling: React.FC = () => {
   const [selectedProductForDetails, setSelectedProductForDetails] = useState<Product | null>(null);
   const [isMobileCartOpen, setIsMobileCartOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [checkoutErrorMessage, setCheckoutErrorMessage] = useState<string | null>(null);
 
   // Batches for the current clinic branch
   const branchBatches = useMemo(() => {
@@ -267,10 +268,12 @@ export const PosBilling: React.FC = () => {
 
   const selectedCustomer = customers.find(c => c.customerId === selectedCustomerId) || customers[customers.length - 1];
 
-  const handleCheckout = () => {
+  const handleCheckout = async () => {
     if (cart.length === 0 || isSubmitting) return;
+    setCheckoutErrorMessage(null);
+
     if (paymentMode === 'UPI' && !upiRefNo.trim()) {
-      alert('Please enter the UPI Reference Number for digital payments.');
+      setCheckoutErrorMessage('Please enter the UPI Reference Number for digital payments.');
       return;
     }
 
@@ -295,15 +298,19 @@ export const PosBilling: React.FC = () => {
         courierCharges: activeCourierCharge
       };
 
-      const newSale = executeSale(payload);
+      const newSale = await executeSale(payload);
       setRecentCompletedSale(newSale);
-      // Reset cart
+      // Reset cart and checkout states
       setCart([]);
       setDiscountAmount(0);
       setIsCourierDelivery(false);
       setUpiRefNo('');
       setSelectedCustomerId('CUST-005');
       setIsMobileCartOpen(false);
+      setCheckoutErrorMessage(null);
+    } catch (err: any) {
+      console.error('POS Checkout Failure:', err);
+      setCheckoutErrorMessage(err?.message || 'Sale could not be saved. Please check inventory stock and connection.');
     } finally {
       setIsSubmitting(false);
     }
@@ -897,18 +904,38 @@ export const PosBilling: React.FC = () => {
               </div>
             </div>
 
+            {/* Checkout Error Message Alert */}
+            {checkoutErrorMessage && (
+              <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <div className="font-semibold text-rose-900">Sale Could Not Be Saved</div>
+                  <div className="text-[11px] leading-tight text-rose-700 mt-0.5">{checkoutErrorMessage}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCheckoutErrorMessage(null)}
+                  className="text-rose-500 hover:text-rose-800 p-0.5"
+                  aria-label="Dismiss error"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
             {/* Checkout Action Button */}
             <button
+              type="button"
               onClick={handleCheckout}
-              disabled={cart.length === 0}
+              disabled={cart.length === 0 || isSubmitting}
               className={`w-full py-3 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 transition-all shadow-xs ${
-                cart.length > 0
+                cart.length > 0 && !isSubmitting
                   ? 'bg-teal-700 text-white hover:bg-teal-800 cursor-pointer'
                   : 'bg-slate-200 text-slate-400 cursor-not-allowed'
               }`}
             >
               <Receipt className="w-4 h-4" />
-              <span>Complete Sale & Generate Bill</span>
+              <span>{isSubmitting ? 'Processing & Validating Sale...' : 'Complete Sale & Generate Bill'}</span>
             </button>
 
           </div>
@@ -1157,6 +1184,14 @@ export const PosBilling: React.FC = () => {
                 <span className="text-teal-700 tabular-nums">₹{netPayable.toFixed(2)}</span>
               </div>
             </div>
+
+            {/* Mobile Checkout Error Alert */}
+            {checkoutErrorMessage && (
+              <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div className="flex-1 text-[11px] leading-tight text-rose-700">{checkoutErrorMessage}</div>
+              </div>
+            )}
 
             {/* Mobile Checkout Button (Big 48px touch target) */}
             <button

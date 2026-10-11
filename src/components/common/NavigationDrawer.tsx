@@ -53,7 +53,7 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
     batchPricingMode
   } = useClinic();
 
-  const isAdmin = currentUser.role === 'Admin';
+  const isAdmin = currentUser?.role === 'Admin';
 
   // Search filter
   const [searchQuery, setSearchQuery] = useState('');

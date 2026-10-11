@@ -31,18 +31,29 @@ app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '50mb' }));
 
 // Default SQL Server configuration
+const connectionString = process.env.SQL_CONNECTION_STRING || '';
+const isWindowsAuth = process.env.SQL_AUTH_TYPE === 'WINDOWS_AUTH' || 
+                      process.env.SQL_TRUSTED_CONNECTION === 'true' || 
+                      !process.env.SQL_SERVER_USER;
+
 const defaultSqlConfig = {
-  server: process.env.SQL_SERVER_HOST || 'localhost',
+  server: process.env.SQL_SERVER_HOST || 'localhost\\SQLEXPRESS',
   port: parseInt(process.env.SQL_SERVER_PORT || '1433', 10),
   database: process.env.SQL_SERVER_DB || 'MediClinic_ERP',
-  user: process.env.SQL_SERVER_USER || 'mediclinic_user',
-  password: process.env.SQL_SERVER_PASSWORD || 'MediClinic@2026!Secure',
+  user: isWindowsAuth ? undefined : (process.env.SQL_SERVER_USER || 'mediclinic_user'),
+  password: isWindowsAuth ? undefined : (process.env.SQL_SERVER_PASSWORD || ''),
   options: {
     encrypt: process.env.SQL_ENCRYPT === 'true',
     trustServerCertificate: true,
-    enableArithAbort: true
+    enableArithAbort: true,
+    trustedConnection: isWindowsAuth
   }
 };
+
+if (isWindowsAuth) {
+  delete defaultSqlConfig.user;
+  delete defaultSqlConfig.password;
+}
 
 let pool = null;
 
@@ -50,11 +61,34 @@ async function getPool(customConfig) {
   if (!sql) {
     throw new Error('The "mssql" npm package is not installed. Please run "npm install mssql" on this machine.');
   }
-  const config = customConfig || defaultSqlConfig;
   if (!pool) {
-    console.log(`[SQL Bridge] Connecting to Microsoft SQL Server at ${config.server}:${config.port}/${config.database}...`);
-    pool = await sql.connect(config);
-    console.log(`[SQL Bridge] Connected successfully to ${config.database}!`);
+    if (connectionString) {
+      console.log(`[SQL Bridge] Connecting using Connection String...`);
+      pool = await sql.connect(connectionString);
+      console.log(`[SQL Bridge] Connected successfully via Connection String!`);
+    } else {
+      const config = customConfig || defaultSqlConfig;
+      console.log(`[SQL Bridge] Connecting to Microsoft SQL Server at ${config.server}:${config.port}/${config.database} (Windows Auth: ${!!config.options.trustedConnection})...`);
+      try {
+        pool = await sql.connect(config);
+        console.log(`[SQL Bridge] Connected successfully to ${config.database}!`);
+      } catch (err) {
+        // If standard connection failed, attempt trusted connection (Windows Auth)
+        if (!config.options.trustedConnection) {
+          console.log(`[SQL Bridge] Standard auth failed. Retrying with Windows Integrated Security...`);
+          const trustedConfig = {
+            ...config,
+            options: { ...config.options, trustedConnection: true }
+          };
+          delete trustedConfig.user;
+          delete trustedConfig.password;
+          pool = await sql.connect(trustedConfig);
+          console.log(`[SQL Bridge] Connected with Windows Authentication!`);
+        } else {
+          throw err;
+        }
+      }
+    }
   }
   return pool;
 }
@@ -215,76 +249,354 @@ app.post('/api/batches', async (req, res) => {
 });
 
 // =========================================================================
-// 5. READ: Sales Invoices
+// 5. READ: Sales Invoices (Headers + Line Items)
 // =========================================================================
 app.get('/api/sales', async (req, res) => {
   try {
     const p = await getPool();
+    // 1. Fetch latest 200 sales headers preserving existing ordering
     const headersResult = await p.request().query('SELECT TOP 200 * FROM dbo.SalesHeaders ORDER BY SaleDate DESC');
-    res.json({ success: true, sales: headersResult.recordset });
+    const salesHeaders = headersResult.recordset || [];
+
+    if (salesHeaders.length === 0) {
+      return res.json({ success: true, sales: [] });
+    }
+
+    // 2. Safely parameterize matching SaleIds to retrieve child SalesDetails
+    const detailsReq = p.request();
+    const paramNames = [];
+    salesHeaders.forEach((sh, idx) => {
+      const saleId = sh.SaleId || sh.saleId;
+      if (saleId) {
+        const paramName = `sId${idx}`;
+        detailsReq.input(paramName, sql.NVarChar(50), String(saleId));
+        paramNames.push(`@${paramName}`);
+      }
+    });
+
+    let detailsRecords = [];
+    if (paramNames.length > 0) {
+      const detailsQuery = `
+        SELECT 
+          d.*,
+          p.ProductName AS MasterProductName,
+          b.BatchNumber AS MasterBatchNumber
+        FROM dbo.SalesDetails d
+        LEFT JOIN dbo.Products p ON d.ProductId = p.ProductId
+        LEFT JOIN dbo.StockBatches b ON d.BatchId = b.BatchId
+        WHERE d.SaleId IN (${paramNames.join(', ')})
+      `;
+      const detailsResult = await detailsReq.query(detailsQuery);
+      detailsRecords = detailsResult.recordset || [];
+    }
+
+    // 3. Group details by SaleId map
+    const detailsBySaleId = new Map();
+    detailsRecords.forEach(d => {
+      const sId = d.SaleId || d.saleId;
+      if (!detailsBySaleId.has(sId)) {
+        detailsBySaleId.set(sId, []);
+      }
+
+      // Check required fields without fabricating missing historical items
+      // Derive ProductName from dbo.Products join (MasterProductName) or row, and BatchNumber from dbo.StockBatches (MasterBatchNumber) or row
+      const rawProdName = d.MasterProductName ?? d.ProductName ?? d.productName;
+      const rawBatchNo = d.MasterBatchNumber ?? d.BatchNumber ?? d.batchNumber;
+      const rawQty = d.Quantity ?? d.quantity;
+      const rawRate = d.Rate ?? d.UnitPrice ?? d.unitPrice ?? d.rate;
+      const rawAmount = d.Total ?? d.Amount ?? d.TotalLineAmount ?? d.amount;
+      const rawCost = d.CostPrice ?? d.costPrice;
+      const rawProfit = d.Profit ?? d.profit;
+
+      const hasValidQty = rawQty !== undefined && rawQty !== null && !isNaN(Number(rawQty));
+      const hasValidRate = rawRate !== undefined && rawRate !== null && !isNaN(Number(rawRate));
+      const hasValidAmount = rawAmount !== undefined && rawAmount !== null && !isNaN(Number(rawAmount));
+      const hasValidName = typeof rawProdName === 'string' && rawProdName.trim().length > 0;
+
+      const isUnverified = !hasValidName || !hasValidQty || !hasValidRate || !hasValidAmount;
+
+      detailsBySaleId.get(sId).push({
+        saleDetailId: d.DetailId || d.SaleDetailId || d.saleDetailId || '',
+        detailId: d.DetailId || d.SaleDetailId || d.saleDetailId || '',
+        saleId: sId,
+        productId: d.ProductId || d.productId || '',
+        productName: hasValidName ? rawProdName : (rawProdName || ''),
+        batchId: d.BatchId || d.batchId || '',
+        batchNumber: rawBatchNo || '',
+        quantity: hasValidQty ? Number(rawQty) : null,
+        rate: hasValidRate ? Number(rawRate) : null,
+        amount: hasValidAmount ? Number(rawAmount) : null,
+        total: hasValidAmount ? Number(rawAmount) : null,
+        costPrice: (rawCost !== undefined && rawCost !== null && !isNaN(Number(rawCost))) ? Number(rawCost) : null,
+        profit: (rawProfit !== undefined && rawProfit !== null && !isNaN(Number(rawProfit))) ? Number(rawProfit) : null,
+        isUnverified
+      });
+    });
+
+    // 4. Combine headers with their matched details
+    const sales = salesHeaders.map(sh => {
+      const sId = sh.SaleId || sh.saleId;
+      const matchedDetails = detailsBySaleId.get(sId) || [];
+      return {
+        ...sh,
+        details: matchedDetails
+      };
+    });
+
+    res.json({ success: true, sales });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// WRITE: Create Sale Invoice with atomic transaction
+// WRITE: Create Sale Invoice with atomic transaction, strict inventory validation and stock ledger
 app.post('/api/sales', async (req, res) => {
   try {
     const sale = req.body;
+    if (!sale || typeof sale !== 'object') {
+      return res.status(400).json({ success: false, error: 'Request body must be a valid sale object.' });
+    }
+
+    if (!sale.saleId || !String(sale.saleId).trim()) {
+      return res.status(400).json({ success: false, error: 'SaleId is required.' });
+    }
+
+    if (!sale.invoiceNo || !String(sale.invoiceNo).trim()) {
+      return res.status(400).json({ success: false, error: 'InvoiceNo is required.' });
+    }
+
+    if (!sale.locationId || !String(sale.locationId).trim()) {
+      return res.status(400).json({ success: false, error: 'LocationId is required.' });
+    }
+
+    if (!Array.isArray(sale.details) || sale.details.length === 0) {
+      return res.status(400).json({ success: false, error: 'A sale requires at least one itemised line detail.' });
+    }
+
+    // Pre-validate all line items before acquiring database resources
+    for (let i = 0; i < sale.details.length; i++) {
+      const line = sale.details[i];
+      if (!line || typeof line !== 'object') {
+        return res.status(400).json({ success: false, error: `Line item at index ${i} is invalid.` });
+      }
+      if (!line.productId || !String(line.productId).trim()) {
+        return res.status(400).json({ success: false, error: `Line item ${i + 1} is missing ProductId.` });
+      }
+      if (!line.batchId || !String(line.batchId).trim()) {
+        return res.status(400).json({ success: false, error: `Line item ${i + 1} (${line.productName || line.productId}) is missing BatchId.` });
+      }
+      const qty = Number(line.quantity);
+      if (!Number.isInteger(qty) || qty <= 0) {
+        return res.status(400).json({ success: false, error: `Line item ${i + 1} quantity must be a positive whole integer (received: ${line.quantity}).` });
+      }
+      const rate = Number(line.rate);
+      if (isNaN(rate) || rate < 0) {
+        return res.status(400).json({ success: false, error: `Line item ${i + 1} rate must be a non-negative number (received: ${line.rate}).` });
+      }
+      const amount = Number(line.amount);
+      if (isNaN(amount) || amount < 0) {
+        return res.status(400).json({ success: false, error: `Line item ${i + 1} amount must be a non-negative number (received: ${line.amount}).` });
+      }
+    }
+
     const p = await getPool();
+
+    // Idempotency check: if invoice or saleId already exists, do not duplicate
+    const existingCheck = await p.request()
+      .input('CheckSaleId', sql.NVarChar(50), String(sale.saleId))
+      .input('CheckInvoiceNo', sql.NVarChar(50), String(sale.invoiceNo))
+      .query('SELECT SaleId, InvoiceNo FROM dbo.SalesHeaders WHERE SaleId = @CheckSaleId OR InvoiceNo = @CheckInvoiceNo');
+
+    if (existingCheck.recordset && existingCheck.recordset.length > 0) {
+      const existing = existingCheck.recordset[0];
+      return res.status(409).json({
+        success: false,
+        error: `Sale or Invoice already exists in SQL Server (SaleId: ${existing.SaleId}, InvoiceNo: ${existing.InvoiceNo}). Duplicate sale rejected.`,
+        isDuplicate: true,
+        saleId: existing.SaleId,
+        invoiceNo: existing.InvoiceNo
+      });
+    }
+
     const transaction = new sql.Transaction(p);
     await transaction.begin();
 
     try {
-      // 1. Insert Sales Header
+      // 1. Insert Sales Header using VERIFIED dbo.SalesHeaders schema
       const headerReq = new sql.Request(transaction);
-      headerReq.input('SaleId', sql.NVarChar(50), sale.saleId);
-      headerReq.input('InvoiceNo', sql.NVarChar(50), sale.invoiceNo);
-      headerReq.input('LocationId', sql.NVarChar(50), sale.locationId);
-      headerReq.input('CustomerId', sql.NVarChar(50), sale.customerId || '');
-      headerReq.input('CustomerName', sql.NVarChar(100), sale.customerName || 'Walk-in Patient');
-      headerReq.input('CustomerPhone', sql.NVarChar(20), sale.customerPhone || '');
-      headerReq.input('SaleDate', sql.DateTime, new Date(sale.saleDate || Date.now()));
-      headerReq.input('PaymentMode', sql.NVarChar(20), sale.paymentMode || 'Cash');
-      headerReq.input('GrossAmount', sql.Decimal(18, 2), sale.grossAmount || sale.netAmount);
-      headerReq.input('DiscountAmount', sql.Decimal(18, 2), sale.discountAmount || 0);
-      headerReq.input('NetAmount', sql.Decimal(18, 2), sale.netAmount);
-      headerReq.input('CreatedBy', sql.NVarChar(50), sale.createdBy || 'Cashier');
+      headerReq.input('SaleId', sql.NVarChar(50), String(sale.saleId));
+      headerReq.input('InvoiceNo', sql.NVarChar(50), String(sale.invoiceNo));
+      headerReq.input('SaleDate', sql.Date, new Date(sale.saleDate || Date.now()));
+      headerReq.input('LocationId', sql.NVarChar(50), String(sale.locationId));
+      headerReq.input('CustomerId', sql.NVarChar(50), String(sale.customerId || ''));
+      headerReq.input('CustomerName', sql.NVarChar(150), String(sale.customerName || 'Walk-in Patient'));
+      headerReq.input('CustomerPhone', sql.NVarChar(50), String(sale.customerPhone || ''));
+      headerReq.input('PaymentMode', sql.NVarChar(20), String(sale.paymentMode || 'Cash'));
+      headerReq.input('UpiReferenceNo', sql.NVarChar(100), sale.upiReferenceNo ? String(sale.upiReferenceNo).trim() : null);
+      headerReq.input('GrossAmount', sql.Decimal(18, 2), Number(sale.grossAmount ?? sale.netAmount));
+      headerReq.input('DiscountAmount', sql.Decimal(18, 2), Number(sale.discountAmount || 0));
+      headerReq.input('CourierCharges', sql.Decimal(18, 2), Number(sale.courierCharges || 0));
+      headerReq.input('NetAmount', sql.Decimal(18, 2), Number(sale.netAmount));
+      headerReq.input('TotalProfit', sql.Decimal(18, 2), Number(sale.totalProfit || 0));
+      headerReq.input('CreatedBy', sql.NVarChar(100), String(sale.createdBy || 'Cashier'));
 
       await headerReq.query(`
-        INSERT INTO dbo.SalesHeaders (SaleId, InvoiceNo, LocationId, CustomerId, CustomerName, CustomerPhone, SaleDate, PaymentMode, GrossAmount, DiscountAmount, NetAmount, CreatedBy, CreatedDate)
-        VALUES (@SaleId, @InvoiceNo, @LocationId, @CustomerId, @CustomerName, @CustomerPhone, @SaleDate, @PaymentMode, @GrossAmount, @DiscountAmount, @NetAmount, @CreatedBy, GETDATE())
+        INSERT INTO dbo.SalesHeaders (
+          SaleId, InvoiceNo, SaleDate, LocationId, CustomerId, CustomerName, CustomerPhone, 
+          PaymentMode, UpiReferenceNo, GrossAmount, DiscountAmount, CourierCharges, NetAmount, 
+          TotalProfit, CreatedBy, CreatedDate
+        )
+        VALUES (
+          @SaleId, @InvoiceNo, @SaleDate, @LocationId, @CustomerId, @CustomerName, @CustomerPhone, 
+          @PaymentMode, @UpiReferenceNo, @GrossAmount, @DiscountAmount, @CourierCharges, @NetAmount, 
+          @TotalProfit, @CreatedBy, GETDATE()
+        )
       `);
 
-      // 2. Insert Sales Details & update batch inventory
-      if (Array.isArray(sale.details)) {
-        for (const line of sale.details) {
-          const detailReq = new sql.Request(transaction);
-          detailReq.input('SaleDetailId', sql.NVarChar(50), line.saleDetailId || String(Date.now() + Math.random()));
-          detailReq.input('SaleId', sql.NVarChar(50), sale.saleId);
-          detailReq.input('BatchId', sql.NVarChar(50), line.batchId);
-          detailReq.input('ProductId', sql.NVarChar(50), line.productId);
-          detailReq.input('ProductName', sql.NVarChar(200), line.productName || '');
-          detailReq.input('BatchNumber', sql.NVarChar(100), line.batchNumber || '');
-          detailReq.input('Quantity', sql.Int, line.quantity);
-          detailReq.input('Rate', sql.Decimal(18, 2), line.rate);
-          detailReq.input('Amount', sql.Decimal(18, 2), line.amount);
-          detailReq.input('CostPrice', sql.Decimal(18, 2), line.costPrice || 0);
+      // 2. Validate batches, deduct stock with rowlock, insert details, and write ledger atomically
+      const now = new Date();
+      now.setHours(0, 0, 0, 0);
 
-          await detailReq.query(`
-            INSERT INTO dbo.SalesDetails (SaleDetailId, SaleId, BatchId, ProductId, ProductName, BatchNumber, Quantity, Rate, Amount, CostPrice, Profit)
-            VALUES (@SaleDetailId, @SaleId, @BatchId, @ProductId, @ProductName, @BatchNumber, @Quantity, @Rate, @Amount, @CostPrice, (@Amount - (@CostPrice * @Quantity)));
+      for (let idx = 0; idx < sale.details.length; idx++) {
+        const line = sale.details[idx];
+        const lineQty = Math.floor(Number(line.quantity));
 
-            UPDATE dbo.StockBatches SET CurrentQuantity = CurrentQuantity - @Quantity WHERE BatchId = @BatchId;
-          `);
+        // Lock batch row to prevent race conditions & negative stock
+        const batchCheckReq = new sql.Request(transaction);
+        batchCheckReq.input('LockBatchId', sql.NVarChar(50), String(line.batchId));
+        const batchCheckRes = await batchCheckReq.query(`
+          SELECT BatchId, ProductId, LocationId, BatchNumber, CurrentQuantity, ExpiryDate, CostPrice
+          FROM dbo.StockBatches WITH (UPDLOCK, ROWLOCK)
+          WHERE BatchId = @LockBatchId
+        `);
+
+        if (!batchCheckRes.recordset || batchCheckRes.recordset.length === 0) {
+          throw new Error(`Batch "${line.batchId}" does not exist in SQL Server for item "${line.productName || line.productId}".`);
         }
+
+        const dbBatch = batchCheckRes.recordset[0];
+
+        // Check ProductId matches batch
+        if (String(dbBatch.ProductId).trim() !== String(line.productId).trim()) {
+          throw new Error(`Batch "${line.batchId}" belongs to Product "${dbBatch.ProductId}", not requested Product "${line.productId}".`);
+        }
+
+        // Check Location matches sale branch location
+        if (dbBatch.LocationId && String(dbBatch.LocationId).trim() !== String(sale.locationId).trim()) {
+          throw new Error(`Batch "${line.batchId}" belongs to Branch "${dbBatch.LocationId}", but sale is at Branch "${sale.locationId}".`);
+        }
+
+        // Check expiration
+        if (dbBatch.ExpiryDate) {
+          const exp = new Date(dbBatch.ExpiryDate);
+          if (!isNaN(exp.getTime()) && exp < now) {
+            const expFormatted = exp.toISOString().split('T')[0];
+            throw new Error(`Batch "${dbBatch.BatchNumber || line.batchId}" expired on ${expFormatted}. Expired batches cannot be sold.`);
+          }
+        }
+
+        // Check stock sufficiency
+        const currentQty = Number(dbBatch.CurrentQuantity || 0);
+        if (currentQty < lineQty) {
+          throw new Error(`Insufficient stock for Batch "${dbBatch.BatchNumber || line.batchId}" (${line.productName || line.productId}). Available: ${currentQty}, Requested: ${lineQty}.`);
+        }
+
+        const newBalanceQty = currentQty - lineQty;
+
+        // Deduct batch stock with atomic concurrency guard
+        const updateBatchReq = new sql.Request(transaction);
+        updateBatchReq.input('UpdBatchId', sql.NVarChar(50), String(line.batchId));
+        updateBatchReq.input('DeductQty', sql.Int, lineQty);
+        const updateResult = await updateBatchReq.query(`
+          UPDATE dbo.StockBatches
+          SET CurrentQuantity = CurrentQuantity - @DeductQty
+          WHERE BatchId = @UpdBatchId AND CurrentQuantity >= @DeductQty;
+        `);
+
+        if (updateResult.rowsAffected[0] === 0) {
+          throw new Error(`Concurrent stock deduction conflict on Batch "${line.batchId}". Insufficient remaining stock.`);
+        }
+
+        // Insert Sales Detail using VERIFIED dbo.SalesDetails schema:
+        // DetailId, SaleId, ProductId, BatchId, Quantity, Rate, CostPrice, Profit, Total
+        const detailId = line.detailId || line.saleDetailId || `SD-${sale.saleId}-${idx + 1}`;
+        const lineRate = Number(line.rate);
+        const lineCostPrice = Number(line.costPrice ?? dbBatch.CostPrice ?? 0);
+        const lineTotal = Number(line.total ?? line.amount ?? (lineRate * lineQty));
+        const lineProfit = Number(line.profit ?? (lineTotal - (lineCostPrice * lineQty)));
+
+        const detailReq = new sql.Request(transaction);
+        detailReq.input('DetailId', sql.NVarChar(50), detailId);
+        detailReq.input('SaleId', sql.NVarChar(50), String(sale.saleId));
+        detailReq.input('ProductId', sql.NVarChar(50), String(line.productId));
+        detailReq.input('BatchId', sql.NVarChar(50), String(line.batchId));
+        detailReq.input('Quantity', sql.Int, lineQty);
+        detailReq.input('Rate', sql.Decimal(18, 2), lineRate);
+        detailReq.input('CostPrice', sql.Decimal(18, 2), lineCostPrice);
+        detailReq.input('Profit', sql.Decimal(18, 2), lineProfit);
+        detailReq.input('Total', sql.Decimal(18, 2), lineTotal);
+
+        await detailReq.query(`
+          INSERT INTO dbo.SalesDetails (
+            DetailId, SaleId, ProductId, BatchId, Quantity, Rate, CostPrice, Profit, Total
+          )
+          VALUES (
+            @DetailId, @SaleId, @ProductId, @BatchId, @Quantity, @Rate, @CostPrice, @Profit, @Total
+          );
+        `);
+
+        // Atomically insert Stock Movement Ledger entry in the SAME transaction using VERIFIED dbo.StockMovementLedger schema:
+        // MovementId, MovementDate, LocationId, ProductId, BatchId, MovementType, QuantityDelta, BalanceAfter, ReferenceNo, CostPrice, SellingPrice, FiscalYear, Remarks, CreatedBy
+        const movementId = `MOV-${sale.saleId}-${idx + 1}-${Date.now().toString().slice(-4)}`;
+        const batchSellingPrice = Number(dbBatch.SellingPrice ?? lineRate);
+
+        // Consistent signed QuantityDelta convention: Sale deducts stock, so QuantityDelta = -lineQty
+        const quantityDelta = -lineQty;
+        const balanceAfter = newBalanceQty;
+
+        // Current Indian Fiscal Year (e.g. 2026-2027)
+        const saleDateObj = new Date(sale.saleDate || Date.now());
+        const calYear = saleDateObj.getFullYear();
+        const calMonth = saleDateObj.getMonth() + 1; // 1-12
+        const fyStart = calMonth >= 4 ? calYear : calYear - 1;
+        const fiscalYear = `${fyStart}-${fyStart + 1}`;
+
+        const ledgerReq = new sql.Request(transaction);
+        ledgerReq.input('MovementId', sql.NVarChar(50), movementId);
+        ledgerReq.input('LocationId', sql.NVarChar(50), String(sale.locationId));
+        ledgerReq.input('ProductId', sql.NVarChar(50), String(line.productId));
+        ledgerReq.input('BatchId', sql.NVarChar(50), String(line.batchId));
+        ledgerReq.input('MovementType', sql.NVarChar(50), 'Sale');
+        ledgerReq.input('QuantityDelta', sql.Int, quantityDelta);
+        ledgerReq.input('BalanceAfter', sql.Int, balanceAfter);
+        ledgerReq.input('ReferenceNo', sql.NVarChar(100), String(sale.invoiceNo));
+        ledgerReq.input('CostPrice', sql.Decimal(18, 2), lineCostPrice);
+        ledgerReq.input('SellingPrice', sql.Decimal(18, 2), batchSellingPrice);
+        ledgerReq.input('FiscalYear', sql.NVarChar(20), fiscalYear);
+        ledgerReq.input('Remarks', sql.NVarChar(500), `POS Sale ${sale.invoiceNo} (${lineQty} units dispensed)`);
+        ledgerReq.input('CreatedBy', sql.NVarChar(100), String(sale.createdBy || 'Cashier'));
+
+        await ledgerReq.query(`
+          INSERT INTO dbo.StockMovementLedger (
+            MovementId, MovementDate, LocationId, ProductId, BatchId, MovementType, 
+            QuantityDelta, BalanceAfter, ReferenceNo, CostPrice, SellingPrice, FiscalYear, Remarks, CreatedBy
+          )
+          VALUES (
+            @MovementId, GETDATE(), @LocationId, @ProductId, @BatchId, @MovementType, 
+            @QuantityDelta, @BalanceAfter, @ReferenceNo, @CostPrice, @SellingPrice, @FiscalYear, @Remarks, @CreatedBy
+          )
+        `);
       }
 
       await transaction.commit();
       res.json({ success: true, saleId: sale.saleId, invoiceNo: sale.invoiceNo });
     } catch (txErr) {
-      await transaction.rollback();
-      throw txErr;
+      try {
+        await transaction.rollback();
+      } catch (rbErr) {
+        console.error('Transaction rollback error:', rbErr.message);
+      }
+      return res.status(400).json({ success: false, error: txErr.message });
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -332,12 +644,12 @@ app.post('/api/customers', async (req, res) => {
 });
 
 // =========================================================================
-// 7. READ & WRITE: Stock Movement Ledger
+// 7. READ & WRITE: Stock Movement Ledger (VERIFIED dbo.StockMovementLedger schema)
 // =========================================================================
 app.get('/api/ledger', async (req, res) => {
   try {
     const p = await getPool();
-    const result = await p.request().query('SELECT TOP 500 * FROM dbo.StockMovementLedger ORDER BY CreatedDate DESC');
+    const result = await p.request().query('SELECT TOP 500 * FROM dbo.StockMovementLedger ORDER BY MovementDate DESC');
     res.json({ success: true, ledger: result.recordset });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -349,20 +661,30 @@ app.post('/api/ledger', async (req, res) => {
     const l = req.body;
     const p = await getPool();
     const q = p.request();
-    q.input('MovementId', sql.NVarChar(50), l.movementId);
+    q.input('MovementId', sql.NVarChar(50), l.movementId || `MOV-${Date.now()}`);
+    q.input('LocationId', sql.NVarChar(50), l.locationId || 'LOC-HOS');
     q.input('ProductId', sql.NVarChar(50), l.productId);
-    q.input('LocationId', sql.NVarChar(50), l.locationId);
     q.input('BatchId', sql.NVarChar(50), l.batchId);
-    q.input('MovementType', sql.NVarChar(50), l.movementType);
-    q.input('ReferenceNo', sql.NVarChar(100), l.referenceNo);
-    q.input('QtyIn', sql.Int, l.qtyIn || 0);
-    q.input('QtyOut', sql.Int, l.qtyOut || 0);
-    q.input('BalanceQty', sql.Int, l.balanceQty || 0);
-    q.input('CreatedBy', sql.NVarChar(50), l.createdBy || 'System');
+    q.input('MovementType', sql.NVarChar(50), l.movementType || 'Manual Adjustment');
+    const qtyDelta = Number(l.quantityDelta ?? (l.qtyIn ? l.qtyIn : (l.qtyOut ? -l.qtyOut : 0)));
+    q.input('QuantityDelta', sql.Int, qtyDelta);
+    q.input('BalanceAfter', sql.Int, Number(l.balanceAfter ?? l.balanceQty ?? 0));
+    q.input('ReferenceNo', sql.NVarChar(100), l.referenceNo || 'MANUAL-LEDGER');
+    q.input('CostPrice', sql.Decimal(18, 2), Number(l.costPrice || 0));
+    q.input('SellingPrice', sql.Decimal(18, 2), Number(l.sellingPrice || 0));
+    q.input('FiscalYear', sql.NVarChar(20), l.fiscalYear || '2026-2027');
+    q.input('Remarks', sql.NVarChar(500), l.remarks || l.movementType || '');
+    q.input('CreatedBy', sql.NVarChar(100), l.createdBy || 'System');
 
     await q.query(`
-      INSERT INTO dbo.StockMovementLedger (MovementId, ProductId, LocationId, BatchId, MovementType, ReferenceNo, QtyIn, QtyOut, BalanceQty, CreatedDate, CreatedBy)
-      VALUES (@MovementId, @ProductId, @LocationId, @BatchId, @MovementType, @ReferenceNo, @QtyIn, @QtyOut, @BalanceQty, GETDATE(), @CreatedBy)
+      INSERT INTO dbo.StockMovementLedger (
+        MovementId, MovementDate, LocationId, ProductId, BatchId, MovementType, 
+        QuantityDelta, BalanceAfter, ReferenceNo, CostPrice, SellingPrice, FiscalYear, Remarks, CreatedBy
+      )
+      VALUES (
+        @MovementId, GETDATE(), @LocationId, @ProductId, @BatchId, @MovementType, 
+        @QuantityDelta, @BalanceAfter, @ReferenceNo, @CostPrice, @SellingPrice, @FiscalYear, @Remarks, @CreatedBy
+      )
     `);
     res.json({ success: true, movementId: l.movementId });
   } catch (err) {
@@ -403,7 +725,7 @@ app.post('/api/sync/all', async (req, res) => {
     const bths = await p.request().query('SELECT * FROM dbo.StockBatches WHERE CurrentQuantity > 0');
     const sls = await p.request().query('SELECT TOP 100 * FROM dbo.SalesHeaders ORDER BY SaleDate DESC');
     const custs = await p.request().query('SELECT * FROM dbo.Customers');
-    const ldgr = await p.request().query('SELECT TOP 100 * FROM dbo.StockMovementLedger ORDER BY CreatedDate DESC');
+    const ldgr = await p.request().query('SELECT TOP 100 * FROM dbo.StockMovementLedger ORDER BY MovementDate DESC');
 
     res.json({
       success: true,

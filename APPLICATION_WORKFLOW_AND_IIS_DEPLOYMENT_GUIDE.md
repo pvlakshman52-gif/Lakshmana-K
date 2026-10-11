@@ -287,6 +287,45 @@ The script creates the following schema:
 
 ## 5. Step-by-Step Local IIS Server Installation & Hosting
 
+### Step 5.0: Automated Customer Installation Pipeline (1-Click MediClinic-ERP-Setup)
+
+MediClinic Commerce ERP provides an automated enterprise distribution pipeline separating developer build generation from customer-side on-premise execution:
+
+```
+Developer/release side
+AI Studio
+   ↓
+Build
+   ↓
+mediclinic-ui-build.zip
+
+Customer side
+SQL Server (DESKTOP-JN61NSF\SQLEXPRESS)
+   ↓
+MediClinic-ERP-Setup.exe / .bat
+   ↓
+Automatic dependency check (Node.js, IIS, URL Rewrite 2.1, ARR 3.0)
+   ↓
+IIS + Rewrite + ARR (Enables features, proxy, and website bindings)
+   ↓
+SQL Bridge Windows Service (Port 5001, 24/7 background service on boot)
+   ↓
+Extract UI ZIP (Extracts to C:\inetpub\wwwroot\mediclinic)
+   ↓
+Configure API (Reverse proxy /api/* -> http://localhost:5001/api/*)
+   ↓
+Health checks (5-point probe: bridge, SQL query, IIS, reverse proxy)
+   ↓
+Go Live (Desktop shortcuts + automatic browser launch)
+```
+
+**Quick Automated Installation for Customers:**
+1. Download `MediClinic-ERP-Setup.bat` (or `MediClinic-ERP-Setup.ps1`) and `mediclinic-ui-build.zip` from **Setup & Tools ➔ UI Deployment & Build Package**.
+2. Right-click `MediClinic-ERP-Setup.bat` and select **Run as Administrator** (or run `powershell -ExecutionPolicy Bypass -File .\MediClinic-ERP-Setup.ps1`).
+3. The script automatically executes all 8 stages, verifies health, creates desktop shortcuts, and launches the ERP.
+
+---
+
 ### Step 5.1: Install IIS & Prerequisites
 1. Press `Win + R`, type `optionalfeatures`, and press **Enter**.
 2. Expand **Internet Information Services**:
@@ -466,27 +505,44 @@ Open a browser and navigate to `http://localhost:5001/api/health`. You will rece
 
 ---
 
-### Step 6.3: Run as a Persistent Windows Service (via PM2 or NSSM)
+### Step 6.3: Run as a Persistent Windows Service (Native MediClinicSqlBridge Architecture)
 
-#### Option A: Using PM2 (Recommended)
+> **CRITICAL ARCHITECTURAL RULE:** Never run `.bat` files directly with `sc.exe create binPath="..."`. Passing batch scripts directly causes Windows Service Control Manager (SCM) Error 1053 because `.bat` files do not implement the Windows Service Control Handler dispatcher.
+
+MediClinic ERP implements a proper native Windows background service architecture:
+
+1. **Native Executable Wrapper (`MediClinicSqlBridge.exe`):**
+   Compiled automatically from C# (`System.ServiceProcess.ServiceBase`) by the automated installer (`MediClinic-ERP-Setup.ps1` / `repair-service.ps1`) using built-in `.NET Framework` compilers (`csc.exe`).
+2. **Hidden Execution:**
+   Launches Node.js with `CreateNoWindow = true` and `WindowStyle = Hidden`. No open Command Prompt or PowerShell terminal is visible, and closing CMD or PowerShell will **not** terminate the bridge.
+3. **Automatic System Startup & Auto-Recovery:**
+   Registered with Windows Service Control Manager to start automatically on system boot before user login, with triple-stage auto-recovery on crashes (10s, 20s, 60s delays).
+4. **Log Rotation:**
+   Writes stdout and stderr to `C:\ProgramData\MediClinic\Logs\bridge.log` and `bridge-error.log` with automatic 10MB log rotation.
+5. **No Cleartext Passwords:**
+   Supports Windows Authentication (Trusted Connection) natively for local SQL Server instances.
+
+#### Service Registration Command (Idempotent):
 ```powershell
-npm install -g pm2 pm2-windows-service
-pm2-service-install
-pm2 start local-sql-bridge.js --name "mediclinic-sql-bridge"
-pm2 save
+# 1. Register or update the service in Windows SCM
+sc.exe create MediClinicSqlBridge binPath= "C:\Program Files\MediClinic\SQLBridge\MediClinicSqlBridge.exe" start= auto DisplayName= "MediClinic ERP SQL Bridge"
+
+# 2. Configure description and crash auto-recovery
+sc.exe description MediClinicSqlBridge "MediClinic Commerce ERP persistent local Microsoft SQL Server synchronization bridge service running on port 5001"
+sc.exe failure MediClinicSqlBridge reset= 86400 actions= restart/10000/restart/20000/restart/60000
+
+# 3. Start the service
+sc.exe start MediClinicSqlBridge
+
+# 4. Verify running state
+sc.exe query MediClinicSqlBridge
 ```
 
-#### Option B: Using NSSM (Non-Sucking Service Manager)
-1. Download NSSM from [nssm.cc](https://nssm.cc).
-2. Open PowerShell as Administrator and run:
-   ```powershell
-   nssm install MediClinicSqlBridge "C:\Program Files\nodejs\node.exe" "C:\inetpub\wwwroot\mediclinic\local-sql-bridge.js"
-   nssm set MediClinicSqlBridge AppDirectory "C:\inetpub\wwwroot\mediclinic"
-   nssm set MediClinicSqlBridge AppEnvironmentExtra SQL_SERVER_HOST=localhost SQL_SERVER_PORT=1433 SQL_SERVER_DB=MediClinic_ERP SQL_SERVER_USER=mediclinic_user SQL_SERVER_PASSWORD=MediClinic@2026!Secure SQL_BRIDGE_PORT=5001
-   nssm start MediClinicSqlBridge
-   ```
-
-Now, the SQL bridge runs automatically as an independent background Windows service that restarts on system reboots.
+#### Service Management Operations:
+- **Start:** `sc.exe start MediClinicSqlBridge` (or PowerShell `Start-Service MediClinicSqlBridge`)
+- **Stop:** `sc.exe stop MediClinicSqlBridge` (or PowerShell `Stop-Service MediClinicSqlBridge`)
+- **Restart:** `sc.exe stop MediClinicSqlBridge && timeout /t 2 && sc.exe start MediClinicSqlBridge` (or `Restart-Service MediClinicSqlBridge`)
+- **Repair / Reinstall:** `powershell -ExecutionPolicy Bypass -File "C:\Program Files\MediClinic\SQLBridge\repair-service.ps1"`
 
 ---
 

@@ -53,7 +53,7 @@ export const Header: React.FC<HeaderProps> = ({
     logoutUser
   } = useClinic();
 
-  const isAdmin = currentUser.role === 'Admin';
+  const isAdmin = currentUser?.role === 'Admin';
 
   // Notifications Popover State
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
@@ -434,7 +434,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* 3.5 Database & Server Connection Badge */}
-          <DatabaseConnectionBadge onOpenSqlServer={onOpenSqlServer} />
+          <DatabaseConnectionBadge onOpenSqlServer={onOpenSqlServer} onNavigate={setCurrentTab} />
 
           {/* 4. Settings Gear Icon */}
           <button

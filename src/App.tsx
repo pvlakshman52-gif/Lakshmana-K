@@ -21,6 +21,10 @@ import { OfflineIndicator } from './components/common/OfflineIndicator';
 import { PWAOfflineSyncModal } from './components/common/PWAOfflineSyncModal';
 import { PWAOfflineSyncView } from './components/pwa/PWAOfflineSyncView';
 import { SqlQueryStudioView } from './components/admin/SqlQueryStudioView';
+import { UIDeploymentView } from './components/admin/UIDeploymentView';
+import { BranchDataSyncCenter } from './components/admin/BranchDataSyncCenter';
+import { EmailSyncView } from './components/reports/EmailSyncView';
+import { ConsolidatedSalesView } from './components/reports/ConsolidatedSalesView';
 
 const ClinicAppShell: React.FC = () => {
   const { isAuthenticated, logoutUser, currentUser } = useClinic();
@@ -157,6 +161,32 @@ const ClinicAppShell: React.FC = () => {
             onNavigate={tab => setCurrentTab(tab)}
           />
         )}
+
+        {currentTab === 'ui-deployment' && (
+          <UIDeploymentView />
+        )}
+
+        {(currentTab === 'branch-sync' || currentTab === 'branch-import') && (
+          <BranchDataSyncCenter
+            onNavigateToReports={() => setCurrentTab('reports')}
+            onNavigateToOpeningStock={() => setCurrentTab('opening-stock')}
+            onNavigateToPos={() => setCurrentTab('pos')}
+          />
+        )}
+
+        {currentTab === 'email-sync' && (
+          <EmailSyncView
+            onNavigateToImport={() => setCurrentTab('branch-sync')}
+            onNavigateToConsolidated={() => setCurrentTab('consolidated-sales')}
+          />
+        )}
+
+        {currentTab === 'consolidated-sales' && (
+          <ConsolidatedSalesView
+            onNavigateToEmailSync={() => setCurrentTab('email-sync')}
+            onNavigateToImport={() => setCurrentTab('branch-sync')}
+          />
+        )}
       </main>
 
       {/* Database & Architecture Settings Modal */}
@@ -177,6 +207,7 @@ const ClinicAppShell: React.FC = () => {
           onClose={() => setIsSqlServerModalOpen(false)}
           defaultTab={sqlServerActiveTab}
           onNavigateToOpeningStock={() => setCurrentTab('opening-stock')}
+          onNavigateToQueryStudio={() => setCurrentTab('sql-studio')}
         />
       )}
 
@@ -198,7 +229,7 @@ const ClinicAppShell: React.FC = () => {
             <span>ASP.NET Core 8 & SQL Server Architecture</span>
           </div>
           <div className="flex items-center gap-3">
-            {currentUser.role === 'Admin' && (
+            {currentUser?.role === 'Admin' && (
               <>
                 <button
                   onClick={() => {

@@ -2,7 +2,8 @@
  * Local Microsoft SQL Server Service
  * 
  * Provides live two-way read and write between the MediClinic PWA
- * and the local Microsoft SQL Server database via local-sql-bridge.js (port 5001).
+ * and the local Microsoft SQL Server database via local-sql-bridge.js (port 5001)
+ * or production IIS reverse proxy (/api).
  */
 
 import { Product, StockBatch, SalesHeader, Customer, StockMovementLedger } from '../types/erp';
@@ -11,7 +12,8 @@ export interface SqlServerConfig {
   server: string;
   database: string;
   port: number;
-  bridgeUrl: string;
+  bridgeUrl: string;       // Direct bridge endpoint, e.g. 'http://localhost:5001'
+  apiBaseUrl: string;      // Configured frontend API base, defaults to '/api' for IIS reverse proxy
   authType: 'SQL_AUTH' | 'WINDOWS_AUTH';
   user?: string;
   password?: string;
@@ -47,7 +49,7 @@ export interface QueryExecutionResult {
   isSimulated?: boolean;
 }
 
-export const DEFAULT_USER_CONN_STRING = 'Data Source=DESKTOP-JN61NSF\\SQLEXPRESS;Integrated Security=True;Persist Security Info=False;Pooling=False;MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=True;Application Name="SQL Server Management Studio";Command Timeout=0';
+export const DEFAULT_USER_CONN_STRING = 'Data Source=(local)\\SQLEXPRESS;Integrated Security=True;Persist Security Info=False;Pooling=False;MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=True;Application Name="SQL Server Management Studio";Command Timeout=0';
 
 export function parseSqlServerConnectionString(connStr: string): Partial<SqlServerConfig> {
   const result: Partial<SqlServerConfig> = { rawConnectionString: connStr };
@@ -83,12 +85,13 @@ export function parseSqlServerConnectionString(connStr: string): Partial<SqlServ
 }
 
 const DEFAULT_CONFIG: SqlServerConfig = {
-  server: 'DESKTOP-JN61NSF\\SQLEXPRESS',
+  server: '(local)\\SQLEXPRESS',
   database: 'MediClinic_ERP',
   port: 1433,
   bridgeUrl: 'http://localhost:5001',
+  apiBaseUrl: '/api',
   authType: 'WINDOWS_AUTH',
-  rawConnectionString: DEFAULT_USER_CONN_STRING,
+  rawConnectionString: '',
   encrypt: true,
   trustServerCertificate: true
 };
@@ -104,7 +107,7 @@ class LocalSqlServerService {
     port: DEFAULT_CONFIG.port,
     bridgeUrl: DEFAULT_CONFIG.bridgeUrl,
     lastChecked: new Date().toLocaleTimeString(),
-    message: 'Checking local SQL Server connection...'
+    message: 'Initializing SQL Server connection check...'
   };
 
   private listeners: Set<(status: SqlServerStatus) => void> = new Set();
@@ -177,49 +180,145 @@ class LocalSqlServerService {
     return this.config.bridgeUrl || 'http://localhost:5001';
   }
 
+  public getApiBaseUrl(): string {
+    return this.config.apiBaseUrl || '/api';
+  }
+
+  /**
+   * Safe helper to fetch and parse JSON without crashing on HTML
+   */
+  private async safeGetJson(url: string, timeoutMs: number = 2500): Promise<{ ok: boolean; data?: any; error?: string; isHtml?: boolean }> {
+    try {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), timeoutMs);
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers: { 'Accept': 'application/json' }
+      });
+      clearTimeout(id);
+
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('text/html')) {
+        return {
+          ok: false,
+          isHtml: true,
+          error: 'Health endpoint returned HTML instead of JSON. Check IIS /api reverse proxy.'
+        };
+      }
+
+      const text = await res.text();
+      if (text.trim().startsWith('<') || text.toLowerCase().includes('<!doctype')) {
+        return {
+          ok: false,
+          isHtml: true,
+          error: 'Health endpoint returned HTML instead of JSON. Check IIS /api reverse proxy.'
+        };
+      }
+
+      const data = JSON.parse(text);
+      return { ok: res.ok, data };
+    } catch (err: any) {
+      return { ok: false, error: err.message || 'Request failed' };
+    }
+  }
+
   /**
    * Test connection to Local SQL Bridge & Database
+   * 1. Uses configured API base URL (default /api for IIS deployment)
+   * 2. Browser health check calls /api/health
+   * 3. Falls back to direct bridge http://localhost:5001/api/health if in cloud preview
+   * 4. Validates connected === true
+   * 5. Detects SQL Server instance and database dynamically
    */
   public async probeConnection(): Promise<SqlServerStatus> {
     const startTime = performance.now();
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2500);
+    const candidateUrls = [
+      `${this.getApiBaseUrl()}/health`,      // 1. Preferred IIS API base (/api/health)
+      `${this.getBridgeUrl()}/api/health`    // 2. Direct Bridge (http://localhost:5001/api/health)
+    ];
 
-      const res = await fetch(`${this.getBridgeUrl()}/api/health`, {
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-      const latencyMs = Math.round(performance.now() - startTime);
+    let lastError = 'No health endpoint responded';
+    let isHtmlEncountered = false;
 
-      if (res.ok) {
-        const data = await res.json();
-        this.status = {
-          connected: data.connected === true,
-          server: data.server || this.config.server,
-          database: data.database || this.config.database,
-          port: this.config.port || 1433,
-          bridgeUrl: this.getBridgeUrl(),
-          version: data.version || 'Microsoft SQL Server 2022 Express Edition (v16.0)',
-          tableCount: data.tableCount || 12,
-          latencyMs,
-          lastChecked: new Date().toLocaleTimeString(),
-          message: data.connected 
-            ? `Connected to SQL Server (${data.server || this.config.server}) Database: ${data.database || this.config.database}` 
-            : 'Bridge running on port 5001, awaiting SQL Server instance'
-        };
-      } else {
-        this.status.connected = false;
-        this.status.lastChecked = new Date().toLocaleTimeString();
-        this.status.latencyMs = latencyMs;
-        this.status.message = `Local SQL bridge returned HTTP ${res.status}.`;
+    for (const url of candidateUrls) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2000);
+
+        const res = await fetch(url, {
+          signal: controller.signal,
+          headers: { 'Accept': 'application/json' }
+        });
+        clearTimeout(timeoutId);
+
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('text/html')) {
+          isHtmlEncountered = true;
+          lastError = 'Health endpoint returned HTML instead of JSON. Check IIS /api reverse proxy.';
+          continue; // Try next candidate (e.g. direct bridge)
+        }
+
+        const rawText = await res.text();
+        if (rawText.trim().startsWith('<') || rawText.toLowerCase().includes('<!doctype')) {
+          isHtmlEncountered = true;
+          lastError = 'Health endpoint returned HTML instead of JSON. Check IIS /api reverse proxy.';
+          continue;
+        }
+
+        let data: any;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          lastError = 'Invalid JSON response from health endpoint.';
+          continue;
+        }
+
+        if (data && typeof data === 'object') {
+          const latencyMs = Math.round(performance.now() - startTime);
+          const isConnected = data.connected === true;
+
+          // Dynamically detect server and database
+          const dynamicServer = data.server || this.config.server || '(local)\\SQLEXPRESS';
+          const dynamicDatabase = data.database || this.config.database || 'MediClinic_ERP';
+
+          this.status = {
+            connected: isConnected,
+            server: dynamicServer,
+            database: dynamicDatabase,
+            port: this.config.port || 1433,
+            bridgeUrl: url.includes('5001') ? this.getBridgeUrl() : this.getApiBaseUrl(),
+            version: data.version || 'Microsoft SQL Server (Auto-Detected)',
+            tableCount: data.tableCount || 12,
+            latencyMs,
+            lastChecked: new Date().toLocaleTimeString(),
+            message: isConnected 
+              ? `Connected to SQL Server (${dynamicServer}) Database: ${dynamicDatabase}` 
+              : (data.message || 'Bridge active, SQL Server database not connected')
+          };
+
+          // Update config dynamically so other components benefit
+          if (data.server && data.server !== this.config.server) {
+            this.config.server = data.server;
+          }
+          if (data.database && data.database !== this.config.database) {
+            this.config.database = data.database;
+          }
+
+          this.notify();
+          return { ...this.status };
+        }
+      } catch (err: any) {
+        lastError = err.message || 'Connection refused or timeout';
       }
-    } catch {
-      this.status.connected = false;
-      this.status.lastChecked = new Date().toLocaleTimeString();
-      this.status.latencyMs = undefined;
-      this.status.message = `Local SQL Server bridge offline at ${this.getBridgeUrl()}. Using resilient local browser storage.`;
     }
+
+    // If neither connected:
+    this.status.connected = false;
+    this.status.lastChecked = new Date().toLocaleTimeString();
+    this.status.latencyMs = undefined;
+    this.status.message = isHtmlEncountered 
+      ? 'Health endpoint returned HTML instead of JSON. Check IIS /api reverse proxy.'
+      : `SQL Server bridge offline (${lastError}). Using resilient local browser storage.`;
 
     this.notify();
     return { ...this.status };
@@ -239,56 +338,67 @@ class LocalSqlServerService {
     const startTime = performance.now();
     const cleanQuery = query.trim();
 
-    // 1. Try executing on live local SQL Server bridge
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
+    // 1. Try executing on live local SQL Server bridge or IIS reverse proxy
+    const queryUrls = [
+      `${this.getApiBaseUrl()}/query`,
+      `${this.getBridgeUrl()}/api/query`
+    ];
 
-      const res = await fetch(`${this.getBridgeUrl()}/api/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: cleanQuery,
-          connectionString: this.config.rawConnectionString
-        }),
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
+    for (const qUrl of queryUrls) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
 
-      const latencyMs = Math.round(performance.now() - startTime);
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          const records = data.recordset || [];
-          const columns = records.length > 0 ? Object.keys(records[0]) : [];
-          return {
-            success: true,
+        const res = await fetch(qUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({
             query: cleanQuery,
-            recordset: records,
-            rowsAffected: data.rowsAffected || [records.length],
-            columns,
-            latencyMs,
-            timestamp: new Date().toLocaleTimeString(),
-            targetServer: this.status.server || 'DESKTOP-JN61NSF\\SQLEXPRESS',
-            targetDatabase: this.status.database || 'MediClinic_ERP',
-            isSimulated: false
-          };
-        } else {
-          return {
-            success: false,
-            query: cleanQuery,
-            error: data.error || 'SQL execution failed on local server.',
-            latencyMs,
-            timestamp: new Date().toLocaleTimeString(),
-            targetServer: this.status.server || 'DESKTOP-JN61NSF\\SQLEXPRESS',
-            targetDatabase: this.status.database || 'MediClinic_ERP',
-            isSimulated: false
-          };
+            connectionString: this.config.rawConnectionString
+          }),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        const contentType = res.headers.get('content-type') || '';
+        if (!contentType.includes('text/html')) {
+          const rawText = await res.text();
+          if (!rawText.trim().startsWith('<')) {
+            const data = JSON.parse(rawText);
+            const latencyMs = Math.round(performance.now() - startTime);
+
+            if (data.success) {
+              const records = data.recordset || [];
+              const columns = records.length > 0 ? Object.keys(records[0]) : [];
+              return {
+                success: true,
+                query: cleanQuery,
+                recordset: records,
+                rowsAffected: data.rowsAffected || [records.length],
+                columns,
+                latencyMs,
+                timestamp: new Date().toLocaleTimeString(),
+                targetServer: this.status.server || this.config.server || '(local)\\SQLEXPRESS',
+                targetDatabase: this.status.database || this.config.database || 'MediClinic_ERP',
+                isSimulated: false
+              };
+            } else if (data.error) {
+              return {
+                success: false,
+                query: cleanQuery,
+                error: data.error || 'SQL execution failed on local server.',
+                latencyMs,
+                timestamp: new Date().toLocaleTimeString(),
+                targetServer: this.status.server || this.config.server || '(local)\\SQLEXPRESS',
+                targetDatabase: this.status.database || this.config.database || 'MediClinic_ERP',
+                isSimulated: false
+              };
+            }
+          }
         }
+      } catch {
+        // Try next candidate or proceed to simulator
       }
-    } catch {
-      // Bridge is offline; proceed to in-memory fallback
     }
 
     // 2. Resilient In-Memory SQL Simulator Fallback (Allows on-screen query execution immediately)
@@ -298,9 +408,9 @@ class LocalSqlServerService {
     // Case A: @@VERSION, DB_NAME(), GETDATE()
     if (upperQuery.includes('@@VERSION') || upperQuery.includes('DB_NAME()')) {
       const row = {
-        SqlVersion: `Microsoft SQL Server 2022 (RTM) - 16.0.1000.6 (X64) - Express Edition on Windows (Server: ${this.config.server})`,
-        CurrentDb: this.config.database || 'MediClinic_ERP',
-        DataSource: this.config.server || 'DESKTOP-JN61NSF\\SQLEXPRESS',
+        SqlVersion: `Microsoft SQL Server 2022 - Express Edition on Windows (Server: ${this.status.server || this.config.server})`,
+        CurrentDb: this.status.database || this.config.database || 'MediClinic_ERP',
+        DataSource: this.status.server || this.config.server || '(local)\\SQLEXPRESS',
         AuthMode: 'Integrated Security (Windows Authentication)',
         ServerTime: new Date().toISOString(),
         Status: 'ACTIVE'
@@ -313,211 +423,165 @@ class LocalSqlServerService {
         rowsAffected: [1],
         latencyMs,
         timestamp: new Date().toLocaleTimeString(),
-        targetServer: this.config.server,
-        targetDatabase: this.config.database,
+        targetServer: this.status.server || this.config.server || '(local)\\SQLEXPRESS',
+        targetDatabase: this.status.database || this.config.database || 'MediClinic_ERP',
         isSimulated: true
       };
     }
 
-    // Case B: sys.databases
-    if (upperQuery.includes('SYS.DATABASES')) {
-      const dbs = [
-        { database_id: 1, name: 'master', state_desc: 'ONLINE', recovery_model_desc: 'SIMPLE', create_date: '2024-01-01' },
-        { database_id: 2, name: 'tempdb', state_desc: 'ONLINE', recovery_model_desc: 'SIMPLE', create_date: '2024-01-01' },
-        { database_id: 3, name: 'model', state_desc: 'ONLINE', recovery_model_desc: 'FULL', create_date: '2024-01-01' },
-        { database_id: 4, name: 'msdb', state_desc: 'ONLINE', recovery_model_desc: 'SIMPLE', create_date: '2024-01-01' },
-        { database_id: 5, name: this.config.database || 'MediClinic_ERP', state_desc: 'ONLINE', recovery_model_desc: 'SIMPLE', create_date: '2026-09-01' }
-      ];
-      return {
-        success: true,
-        query: cleanQuery,
-        recordset: dbs,
-        columns: Object.keys(dbs[0]),
-        rowsAffected: [dbs.length],
-        latencyMs,
-        timestamp: new Date().toLocaleTimeString(),
-        targetServer: this.config.server,
-        targetDatabase: this.config.database,
-        isSimulated: true
-      };
-    }
-
-    // Case C: INFORMATION_SCHEMA.TABLES or sys.tables
-    if (upperQuery.includes('INFORMATION_SCHEMA.TABLES') || upperQuery.includes('SYS.TABLES')) {
-      const tables = [
-        { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'Products', TABLE_TYPE: 'BASE TABLE', ROW_COUNT: inMemoryData?.products?.length || 100 },
-        { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'StockBatches', TABLE_TYPE: 'BASE TABLE', ROW_COUNT: inMemoryData?.batches?.length || 45 },
-        { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'SalesHeader', TABLE_TYPE: 'BASE TABLE', ROW_COUNT: inMemoryData?.sales?.length || 120 },
-        { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'SalesDetails', TABLE_TYPE: 'BASE TABLE', ROW_COUNT: (inMemoryData?.sales?.length || 120) * 3 },
-        { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'Customers', TABLE_TYPE: 'BASE TABLE', ROW_COUNT: inMemoryData?.customers?.length || 80 },
-        { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'StockMovementLedger', TABLE_TYPE: 'BASE TABLE', ROW_COUNT: inMemoryData?.ledger?.length || 240 },
-        { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'Locations', TABLE_TYPE: 'BASE TABLE', ROW_COUNT: 4 },
-        { TABLE_SCHEMA: 'dbo', TABLE_NAME: 'DatabaseAuditLogs', TABLE_TYPE: 'BASE TABLE', ROW_COUNT: 18 }
-      ];
-      return {
-        success: true,
-        query: cleanQuery,
-        recordset: tables,
-        columns: Object.keys(tables[0]),
-        rowsAffected: [tables.length],
-        latencyMs,
-        timestamp: new Date().toLocaleTimeString(),
-        targetServer: this.config.server,
-        targetDatabase: this.config.database,
-        isSimulated: true
-      };
-    }
-
-    // Case D: dbo.Products
-    if (upperQuery.includes('PRODUCTS')) {
-      let records: any[] = (inMemoryData?.products || []).map(p => ({
+    // Case B: SELECT * FROM dbo.Products
+    if (upperQuery.includes('FROM DBO.PRODUCTS') || upperQuery.includes('FROM PRODUCTS')) {
+      const list = inMemoryData?.products || [];
+      const records = list.slice(0, 50).map(p => ({
         ProductId: p.productId,
         ProductCode: p.productCode,
         ProductName: p.productName,
         CategoryId: p.categoryId,
         CostPrice: p.costPrice,
         SellingPrice: p.sellingPrice,
-        ReorderLevel: p.reorderLevel,
-        VolumeSize: p.volumeSize,
         IsActive: p.isActive ? 1 : 0
       }));
-      if (records.length === 0) {
-        records = [
-          { ProductId: 'PRD-001', ProductCode: 'MED-PCM-500', ProductName: 'Paracetamol 500mg Tablets', CategoryId: 'ANALGESIC', CostPrice: 12.00, SellingPrice: 25.00, ReorderLevel: 50, IsActive: 1 },
-          { ProductId: 'PRD-002', ProductCode: 'MED-AMX-500', ProductName: 'Amoxicillin 500mg Capsules', CategoryId: 'ANTIBIOTIC', CostPrice: 45.00, SellingPrice: 85.00, ReorderLevel: 30, IsActive: 1 },
-          { ProductId: 'PRD-003', ProductCode: 'MED-CTZ-10', ProductName: 'Cetirizine 10mg Tablets', CategoryId: 'ANTIHISTAMINE', CostPrice: 8.00, SellingPrice: 18.00, ReorderLevel: 25, IsActive: 1 }
-        ];
-      }
       return {
         success: true,
         query: cleanQuery,
-        recordset: records.slice(0, 100),
-        columns: Object.keys(records[0] || {}),
+        recordset: records,
+        columns: records.length > 0 ? Object.keys(records[0]) : ['ProductId', 'ProductCode', 'ProductName', 'CostPrice', 'SellingPrice'],
         rowsAffected: [records.length],
         latencyMs,
         timestamp: new Date().toLocaleTimeString(),
-        targetServer: this.config.server,
-        targetDatabase: this.config.database,
+        targetServer: this.status.server || this.config.server || '(local)\\SQLEXPRESS',
+        targetDatabase: this.status.database || this.config.database || 'MediClinic_ERP',
         isSimulated: true
       };
     }
 
-    // Case E: dbo.StockBatches
-    if (upperQuery.includes('STOCKBATCHES') || upperQuery.includes('BATCHES')) {
-      let records: any[] = (inMemoryData?.batches || []).map(b => ({
+    // Case C: SELECT * FROM dbo.StockBatches
+    if (upperQuery.includes('FROM DBO.STOCKBATCHES') || upperQuery.includes('FROM STOCKBATCHES')) {
+      const list = inMemoryData?.batches || [];
+      const records = list.slice(0, 50).map(b => ({
         BatchId: b.batchId,
         ProductId: b.productId,
-        LocationId: b.locationId,
         BatchNumber: b.batchNumber,
-        ExpiryDate: b.expiryDate,
+        LocationId: b.locationId,
         CurrentQuantity: b.currentQuantity,
+        ExpiryDate: b.expiryDate,
         CostPrice: b.costPrice,
         SellingPrice: b.sellingPrice
       }));
-      if (records.length === 0) {
-        records = [
-          { BatchId: 'BAT-001', ProductId: 'PRD-001', LocationId: 'LOC-HOS', BatchNumber: 'PCM-2026-B1', ExpiryDate: '2027-06-30', CurrentQuantity: 150, CostPrice: 12.00, SellingPrice: 25.00 },
-          { BatchId: 'BAT-002', ProductId: 'PRD-002', LocationId: 'LOC-HOS', BatchNumber: 'AMX-2026-A4', ExpiryDate: '2026-12-31', CurrentQuantity: 80, CostPrice: 45.00, SellingPrice: 85.00 }
-        ];
-      }
       return {
         success: true,
         query: cleanQuery,
-        recordset: records.slice(0, 100),
-        columns: Object.keys(records[0] || {}),
+        recordset: records,
+        columns: records.length > 0 ? Object.keys(records[0]) : ['BatchId', 'ProductId', 'BatchNumber', 'CurrentQuantity', 'ExpiryDate'],
         rowsAffected: [records.length],
         latencyMs,
         timestamp: new Date().toLocaleTimeString(),
-        targetServer: this.config.server,
-        targetDatabase: this.config.database,
+        targetServer: this.status.server || this.config.server || '(local)\\SQLEXPRESS',
+        targetDatabase: this.status.database || this.config.database || 'MediClinic_ERP',
         isSimulated: true
       };
     }
 
-    // Case F: dbo.SalesHeader
-    if (upperQuery.includes('SALESHEADER') || upperQuery.includes('SALES')) {
-      let records: any[] = (inMemoryData?.sales || []).map(s => ({
+    // Case D: SELECT * FROM dbo.SalesHeaders
+    if (upperQuery.includes('FROM DBO.SALESHEADERS') || upperQuery.includes('FROM SALESHEADERS')) {
+      const list = inMemoryData?.sales || [];
+      const records = list.slice(0, 50).map(s => ({
         SaleId: s.saleId,
         InvoiceNo: s.invoiceNo,
+        LocationId: s.locationId,
         CustomerName: s.customerName,
-        CustomerPhone: s.customerPhone,
-        PaymentMode: s.paymentMode,
-        GrossAmount: s.grossAmount,
-        DiscountAmount: s.discountAmount,
         NetAmount: s.netAmount,
-        SaleDate: s.saleDate,
-        CreatedBy: s.createdBy
+        PaymentMode: s.paymentMode,
+        SaleDate: s.saleDate
       }));
-      if (records.length === 0) {
-        records = [
-          { SaleId: 'SALE-101', InvoiceNo: 'INV-2026-0042', CustomerName: 'Ramesh Kumar', PaymentMode: 'UPI', GrossAmount: 450.00, NetAmount: 450.00, SaleDate: '2026-10-03 10:15:00', CreatedBy: 'Cashier' },
-          { SaleId: 'SALE-102', InvoiceNo: 'INV-2026-0043', CustomerName: 'Ananya Sharma', PaymentMode: 'Cash', GrossAmount: 210.00, NetAmount: 200.00, SaleDate: '2026-10-03 11:20:00', CreatedBy: 'Dr. Rao' }
-        ];
-      }
       return {
         success: true,
         query: cleanQuery,
-        recordset: records.slice(0, 100),
-        columns: Object.keys(records[0] || {}),
+        recordset: records,
+        columns: records.length > 0 ? Object.keys(records[0]) : ['SaleId', 'InvoiceNo', 'CustomerName', 'NetAmount', 'SaleDate'],
         rowsAffected: [records.length],
         latencyMs,
         timestamp: new Date().toLocaleTimeString(),
-        targetServer: this.config.server,
-        targetDatabase: this.config.database,
+        targetServer: this.status.server || this.config.server || '(local)\\SQLEXPRESS',
+        targetDatabase: this.status.database || this.config.database || 'MediClinic_ERP',
         isSimulated: true
       };
     }
 
-    // Case G: dbo.Customers
-    if (upperQuery.includes('CUSTOMERS')) {
-      let records: any[] = (inMemoryData?.customers || []).map(c => ({
+    // Case E: SELECT * FROM dbo.Customers
+    if (upperQuery.includes('FROM DBO.CUSTOMERS') || upperQuery.includes('FROM CUSTOMERS')) {
+      const list = inMemoryData?.customers || [];
+      const records = list.slice(0, 50).map(c => ({
         CustomerId: c.customerId,
-        FullName: c.fullName,
+        CustomerName: c.customerName,
         Phone: c.phone,
         Email: c.email,
-        Address: c.address,
-        Balance: c.balance,
-        CreatedDate: c.createdDate
+        TotalSpend: c.totalSpend,
+        LoyaltyPoints: c.loyaltyPoints
       }));
-      if (records.length === 0) {
-        records = [
-          { CustomerId: 'CUST-001', FullName: 'Suresh Patil', Phone: '+91 98450 12345', Email: 'suresh@example.com', Balance: 0.00, CreatedDate: '2026-01-15' },
-          { CustomerId: 'CUST-002', FullName: 'Meenakshi Iyer', Phone: '+91 99801 67890', Email: 'meena@example.com', Balance: 150.00, CreatedDate: '2026-02-20' }
-        ];
-      }
       return {
         success: true,
         query: cleanQuery,
-        recordset: records.slice(0, 100),
-        columns: Object.keys(records[0] || {}),
+        recordset: records,
+        columns: records.length > 0 ? Object.keys(records[0]) : ['CustomerId', 'CustomerName', 'Phone', 'TotalSpend'],
         rowsAffected: [records.length],
         latencyMs,
         timestamp: new Date().toLocaleTimeString(),
-        targetServer: this.config.server,
-        targetDatabase: this.config.database,
+        targetServer: this.status.server || this.config.server || '(local)\\SQLEXPRESS',
+        targetDatabase: this.status.database || this.config.database || 'MediClinic_ERP',
         isSimulated: true
       };
     }
 
-    // Generic fallback for any other query
-    const genericRecord = {
-      QueryExecuted: cleanQuery.slice(0, 60) + (cleanQuery.length > 60 ? '...' : ''),
-      TargetServer: this.config.server,
-      TargetDatabase: this.config.database,
-      AuthMode: 'Windows Authentication (Integrated Security)',
-      Status: 'EXECUTED_SUCCESSFULLY',
-      Note: 'Live response ready. Run local-sql-bridge to pipe live queries directly to DESKTOP-JN61NSF\\SQLEXPRESS disk.'
-    };
+    // Case F: SELECT * FROM dbo.StockMovementLedger
+    if (upperQuery.includes('FROM DBO.STOCKMOVEMENTLEDGER') || upperQuery.includes('FROM STOCKMOVEMENTLEDGER')) {
+      const list = inMemoryData?.ledger || [];
+      const records = list.slice(0, 50).map(l => ({
+        MovementId: l.movementId,
+        ProductId: l.productId,
+        BatchId: l.batchId,
+        MovementType: l.movementType,
+        QtyIn: l.qtyIn,
+        QtyOut: l.qtyOut,
+        BalanceQty: l.balanceQty,
+        ReferenceNo: l.referenceNo,
+        CreatedDate: l.createdDate
+      }));
+      return {
+        success: true,
+        query: cleanQuery,
+        recordset: records,
+        columns: records.length > 0 ? Object.keys(records[0]) : ['MovementId', 'ProductId', 'MovementType', 'QtyIn', 'QtyOut', 'BalanceQty'],
+        rowsAffected: [records.length],
+        latencyMs,
+        timestamp: new Date().toLocaleTimeString(),
+        targetServer: this.status.server || this.config.server || '(local)\\SQLEXPRESS',
+        targetDatabase: this.status.database || this.config.database || 'MediClinic_ERP',
+        isSimulated: true
+      };
+    }
+
+    // Default Fallback execution
     return {
       success: true,
       query: cleanQuery,
-      recordset: [genericRecord],
-      columns: Object.keys(genericRecord),
+      recordset: [
+        {
+          Status: 'QUERY_EXECUTED',
+          Command: cleanQuery.slice(0, 40) + (cleanQuery.length > 40 ? '...' : ''),
+          TargetServer: this.status.server || this.config.server || '(local)\\SQLEXPRESS',
+          TargetDatabase: this.status.database || this.config.database || 'MediClinic_ERP',
+          RowsAffected: 1,
+          ExecutionMode: 'Simulator (Live bridge running on port 5001 or IIS /api)',
+          Timestamp: new Date().toISOString()
+        }
+      ],
+      columns: ['Status', 'Command', 'TargetServer', 'TargetDatabase', 'RowsAffected', 'ExecutionMode', 'Timestamp'],
       rowsAffected: [1],
       latencyMs,
       timestamp: new Date().toLocaleTimeString(),
-      targetServer: this.config.server,
-      targetDatabase: this.config.database,
+      targetServer: this.status.server || this.config.server || '(local)\\SQLEXPRESS',
+      targetDatabase: this.status.database || this.config.database || 'MediClinic_ERP',
       isSimulated: true
     };
   }
@@ -527,110 +591,155 @@ class LocalSqlServerService {
   // =========================================================================
 
   public async fetchProducts(): Promise<Product[] | null> {
-    try {
-      const res = await fetch(`${this.getBridgeUrl()}/api/products`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && Array.isArray(data.products) && data.products.length > 0) {
-          return data.products.map((r: any) => ({
-            productId: r.ProductId || r.productId,
-            productCode: r.ProductCode || r.productCode,
-            productName: r.ProductName || r.productName,
-            categoryId: r.CategoryId || r.categoryId,
-            costPrice: Number(r.CostPrice || r.costPrice),
-            sellingPrice: Number(r.SellingPrice || r.sellingPrice),
-            reorderLevel: Number(r.ReorderLevel || r.reorderLevel || 10),
-            volumeSize: r.VolumeSize || r.volumeSize || '',
-            description: r.Description || r.description || '',
-            isActive: r.IsActive !== false,
-            createdDate: r.CreatedDate || new Date().toISOString()
-          }));
-        }
+    const urls = [`${this.getApiBaseUrl()}/products`, `${this.getBridgeUrl()}/api/products`];
+    for (const url of urls) {
+      const res = await this.safeGetJson(url);
+      if (res.ok && res.data?.success && Array.isArray(res.data.products) && res.data.products.length > 0) {
+        return res.data.products.map((r: any) => ({
+          productId: r.ProductId || r.productId,
+          productCode: r.ProductCode || r.productCode,
+          productName: r.ProductName || r.productName,
+          categoryId: r.CategoryId || r.categoryId,
+          costPrice: Number(r.CostPrice || r.costPrice),
+          sellingPrice: Number(r.SellingPrice || r.sellingPrice),
+          reorderLevel: Number(r.ReorderLevel || r.reorderLevel || 10),
+          volumeSize: r.VolumeSize || r.volumeSize || '',
+          description: r.Description || r.description || '',
+          isActive: r.IsActive !== false,
+          createdDate: r.CreatedDate || new Date().toISOString()
+        }));
       }
-    } catch {
-      // Bridge unreachable
     }
     return null;
   }
 
   public async fetchBatches(): Promise<StockBatch[] | null> {
-    try {
-      const res = await fetch(`${this.getBridgeUrl()}/api/batches`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && Array.isArray(data.batches) && data.batches.length > 0) {
-          return data.batches.map((r: any) => ({
-            batchId: r.BatchId || r.batchId,
-            productId: r.ProductId || r.productId,
-            locationId: r.LocationId || r.locationId,
-            batchNumber: r.BatchNumber || r.batchNumber,
-            expiryDate: String(r.ExpiryDate || r.expiryDate).slice(0, 10),
-            purchaseDate: String(r.PurchaseDate || r.purchaseDate || '').slice(0, 10),
-            purchaseInvoiceNo: r.PurchaseInvoiceNo || '',
-            supplierName: r.SupplierName || 'Central Depot',
-            quantityReceived: Number(r.QuantityReceived || r.quantityReceived || r.CurrentQuantity),
-            currentQuantity: Number(r.CurrentQuantity || r.currentQuantity),
-            costPrice: Number(r.CostPrice || r.costPrice),
-            sellingPrice: Number(r.SellingPrice || r.sellingPrice)
-          }));
-        }
+    const urls = [`${this.getApiBaseUrl()}/batches`, `${this.getBridgeUrl()}/api/batches`];
+    for (const url of urls) {
+      const res = await this.safeGetJson(url);
+      if (res.ok && res.data?.success && Array.isArray(res.data.batches) && res.data.batches.length > 0) {
+        return res.data.batches.map((r: any) => ({
+          batchId: r.BatchId || r.batchId,
+          productId: r.ProductId || r.productId,
+          locationId: r.LocationId || r.locationId,
+          batchNumber: r.BatchNumber || r.batchNumber,
+          expiryDate: String(r.ExpiryDate || r.expiryDate).slice(0, 10),
+          purchaseDate: String(r.PurchaseDate || r.purchaseDate || '').slice(0, 10),
+          purchaseInvoiceNo: r.PurchaseInvoiceNo || '',
+          supplierName: r.SupplierName || 'Central Depot',
+          quantityReceived: Number(r.QuantityReceived || r.quantityReceived || r.CurrentQuantity),
+          currentQuantity: Number(r.CurrentQuantity || r.currentQuantity),
+          costPrice: Number(r.CostPrice || r.costPrice),
+          sellingPrice: Number(r.SellingPrice || r.sellingPrice)
+        }));
       }
-    } catch {
-      // Bridge unreachable
     }
     return null;
   }
 
   public async fetchSales(): Promise<SalesHeader[] | null> {
-    try {
-      const res = await fetch(`${this.getBridgeUrl()}/api/sales`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && Array.isArray(data.sales) && data.sales.length > 0) {
-          return data.sales.map((r: any) => ({
+    const urls = [`${this.getApiBaseUrl()}/sales`, `${this.getBridgeUrl()}/api/sales`];
+    for (const url of urls) {
+      const res = await this.safeGetJson(url);
+      if (!res.ok || !res.data) {
+        continue;
+      }
+
+      // Support every response format:
+      // 1. { success: true, sales: [...] }
+      // 2. Bare array [...] (supported legacy format)
+      // 3. { sales: [...] }
+      let rawSalesList: any[] | null = null;
+      if (Array.isArray(res.data)) {
+        rawSalesList = res.data;
+      } else if (res.data.success && Array.isArray(res.data.sales)) {
+        rawSalesList = res.data.sales;
+      } else if (Array.isArray(res.data.sales)) {
+        rawSalesList = res.data.sales;
+      }
+
+      if (rawSalesList !== null) {
+        // Successful response from SQL Server: maps line items and distinguishes empty dataset [] from connection error null
+        return rawSalesList.map((r: any) => {
+          const rawDetails = Array.isArray(r.details) ? r.details : [];
+          const mappedDetails = rawDetails.map((d: any) => {
+            const rawProdName = d.ProductName ?? d.productName ?? d.MasterProductName;
+            const rawQty = d.Quantity ?? d.quantity;
+            const rawRate = d.Rate ?? d.UnitPrice ?? d.unitPrice ?? d.rate;
+            const rawAmount = d.Amount ?? d.Total ?? d.TotalLineAmount ?? d.amount;
+            const rawCost = d.CostPrice ?? d.costPrice;
+            const rawProfit = d.Profit ?? d.profit;
+
+            const hasValidQty = rawQty !== undefined && rawQty !== null && !isNaN(Number(rawQty));
+            const hasValidRate = rawRate !== undefined && rawRate !== null && !isNaN(Number(rawRate));
+            const hasValidAmount = rawAmount !== undefined && rawAmount !== null && !isNaN(Number(rawAmount));
+            const hasValidName = typeof rawProdName === 'string' && rawProdName.trim().length > 0;
+
+            const isUnverified = Boolean(d.isUnverified) || !hasValidName || !hasValidQty || !hasValidRate || !hasValidAmount;
+
+            return {
+              saleDetailId: d.DetailId || d.SaleDetailId || d.saleDetailId || '',
+              detailId: d.DetailId || d.SaleDetailId || d.saleDetailId || '',
+              saleId: d.SaleId || d.saleId || (r.SaleId || r.saleId),
+              productId: d.ProductId || d.productId || '',
+              productName: hasValidName ? rawProdName : (rawProdName || 'Unverified Product'),
+              batchId: d.BatchId || d.batchId || '',
+              batchNumber: d.BatchNumber || d.batchNumber || '',
+              quantity: hasValidQty ? Number(rawQty) : 0,
+              rate: hasValidRate ? Number(rawRate) : 0,
+              amount: hasValidAmount ? Number(rawAmount) : 0,
+              total: hasValidAmount ? Number(rawAmount) : 0,
+              costPrice: (rawCost !== undefined && rawCost !== null && !isNaN(Number(rawCost))) ? Number(rawCost) : 0,
+              profit: (rawProfit !== undefined && rawProfit !== null && !isNaN(Number(rawProfit))) ? Number(rawProfit) : 0,
+              isUnverified
+            };
+          });
+
+          return {
             saleId: r.SaleId || r.saleId,
+            globalSaleId: r.GlobalSaleId || r.globalSaleId,
+            sourceBranchCode: r.SourceBranchCode || r.sourceBranchCode,
             invoiceNo: r.InvoiceNo || r.invoiceNo,
             locationId: r.LocationId || r.locationId,
             customerId: r.CustomerId || r.customerId || '',
             customerName: r.CustomerName || r.customerName || 'Patient',
             customerPhone: r.CustomerPhone || r.customerPhone || '',
             saleDate: r.SaleDate || r.saleDate || new Date().toISOString(),
-            paymentMode: r.PaymentMode || 'Cash',
-            discountAmount: Number(r.DiscountAmount || 0),
-            grossAmount: Number(r.GrossAmount || r.netAmount),
-            netAmount: Number(r.NetAmount || r.netAmount),
-            totalProfit: Number(r.TotalProfit || 0),
-            createdBy: r.CreatedBy || 'Cashier',
-            createdDate: r.CreatedDate || new Date().toISOString(),
-            details: []
-          }));
-        }
+            paymentMode: r.PaymentMode || r.paymentMode || 'Cash',
+            upiReferenceNo: r.UpiReferenceNo || r.upiReferenceNo,
+            discountAmount: Number(r.DiscountAmount ?? r.discountAmount ?? 0),
+            grossAmount: Number(r.GrossAmount ?? r.grossAmount ?? r.netAmount),
+            courierCharges: r.CourierCharges !== undefined ? Number(r.CourierCharges) : (r.courierCharges !== undefined ? Number(r.courierCharges) : undefined),
+            netAmount: Number(r.NetAmount ?? r.netAmount),
+            totalProfit: Number(r.TotalProfit ?? r.totalProfit ?? 0),
+            createdBy: r.CreatedBy || r.createdBy || 'Cashier',
+            createdDate: r.CreatedDate || r.createdDate || new Date().toISOString(),
+            details: mappedDetails,
+            syncStatus: 'SyncedSQL'
+          };
+        });
       }
-    } catch {
-      // Bridge unreachable
     }
+    // Return null when network/HTTP error occurs or bridge is unreachable or response is malformed
     return null;
   }
 
   public async fetchCustomers(): Promise<Customer[] | null> {
-    try {
-      const res = await fetch(`${this.getBridgeUrl()}/api/customers`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && Array.isArray(data.customers) && data.customers.length > 0) {
-          return data.customers.map((c: any) => ({
-            customerId: c.CustomerId || c.customerId,
-            fullName: c.FullName || c.fullName,
-            phone: c.Phone || c.phone,
-            email: c.Email || c.email || '',
-            address: c.Address || c.address || '',
-            balance: Number(c.Balance || c.balance || 0),
-            createdDate: c.CreatedDate || new Date().toISOString()
-          }));
-        }
+    const urls = [`${this.getApiBaseUrl()}/customers`, `${this.getBridgeUrl()}/api/customers`];
+    for (const url of urls) {
+      const res = await this.safeGetJson(url);
+      if (res.ok && res.data?.success && Array.isArray(res.data.customers) && res.data.customers.length > 0) {
+        return res.data.customers.map((c: any) => ({
+          customerId: c.CustomerId || c.customerId,
+          customerName: c.CustomerName || c.FullName || c.fullName || c.customerName || 'Patient',
+          phone: c.Phone || c.phone || '',
+          email: c.Email || c.email || '',
+          address: c.Address || c.address || '',
+          loyaltyPoints: Number(c.LoyaltyPoints || c.loyaltyPoints || 0),
+          totalSpend: Number(c.TotalSpend || c.Balance || c.totalSpend || 0),
+          createdDate: c.CreatedDate || new Date().toISOString()
+        }));
       }
-    } catch {
-      // Bridge unreachable
     }
     return null;
   }
@@ -639,69 +748,99 @@ class LocalSqlServerService {
   // WRITE DATA DIRECTLY TO LOCAL SQL SERVER
   // =========================================================================
 
-  public async writeSale(sale: SalesHeader): Promise<boolean> {
-    try {
-      const res = await fetch(`${this.getBridgeUrl()}/api/sales`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sale)
-      });
-      return res.ok;
-    } catch {
-      return false;
+  public async writeSale(sale: SalesHeader): Promise<{ success: boolean; error?: string; isDuplicate?: boolean }> {
+    const urls = [`${this.getApiBaseUrl()}/sales`, `${this.getBridgeUrl()}/api/sales`];
+    let lastError: string | undefined;
+
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify(sale)
+        });
+
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const json = await res.json().catch(() => null);
+          if (res.ok && json?.success) {
+            return { success: true };
+          }
+          if (json?.error) {
+            lastError = json.error;
+            return { success: false, error: json.error, isDuplicate: Boolean(json.isDuplicate) };
+          }
+        } else {
+          // If HTML response or non-json returned (e.g. dev server 404/fallback)
+          if (!res.ok) {
+            lastError = `HTTP ${res.status}: ${res.statusText || 'Bridge endpoint unavailable'}`;
+          }
+        }
+      } catch (err: any) {
+        lastError = err?.message || 'SQL Server Bridge network error';
+      }
     }
+    return { success: false, error: lastError || 'SQL Server Bridge unreachable' };
   }
 
   public async writeBatch(batch: StockBatch): Promise<boolean> {
-    try {
-      const res = await fetch(`${this.getBridgeUrl()}/api/batches`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(batch)
-      });
-      return res.ok;
-    } catch {
-      return false;
+    const urls = [`${this.getApiBaseUrl()}/batches`, `${this.getBridgeUrl()}/api/batches`];
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify(batch)
+        });
+        if (res.ok) return true;
+      } catch {}
     }
+    return false;
   }
 
   public async writeProduct(product: Product): Promise<boolean> {
-    try {
-      const res = await fetch(`${this.getBridgeUrl()}/api/products`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(product)
-      });
-      return res.ok;
-    } catch {
-      return false;
+    const urls = [`${this.getApiBaseUrl()}/products`, `${this.getBridgeUrl()}/api/products`];
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify(product)
+        });
+        if (res.ok) return true;
+      } catch {}
     }
+    return false;
   }
 
   public async writeCustomer(customer: Customer): Promise<boolean> {
-    try {
-      const res = await fetch(`${this.getBridgeUrl()}/api/customers`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(customer)
-      });
-      return res.ok;
-    } catch {
-      return false;
+    const urls = [`${this.getApiBaseUrl()}/customers`, `${this.getBridgeUrl()}/api/customers`];
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify(customer)
+        });
+        if (res.ok) return true;
+      } catch {}
     }
+    return false;
   }
 
   public async writeLedger(entry: StockMovementLedger): Promise<boolean> {
-    try {
-      const res = await fetch(`${this.getBridgeUrl()}/api/ledger`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(entry)
-      });
-      return res.ok;
-    } catch {
-      return false;
+    const urls = [`${this.getApiBaseUrl()}/ledger`, `${this.getBridgeUrl()}/api/ledger`];
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify(entry)
+        });
+        if (res.ok) return true;
+      } catch {}
     }
+    return false;
   }
 }
 

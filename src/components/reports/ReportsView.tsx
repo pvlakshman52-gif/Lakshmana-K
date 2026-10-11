@@ -27,11 +27,13 @@ import {
   Trash2,
   RotateCcw,
   Printer,
-  X
+  X,
+  ArrowRightLeft
 } from 'lucide-react';
 import { ProductIcon } from '../common/ProductIcon';
 import { sortBatchesByFefo } from '../../utils/batchPricing';
 import { isProductInCategory, resolveCategory, getCategoryDisplayName } from '../../utils/categoryUtils';
+import { BranchDataSyncCenter } from '../admin/BranchDataSyncCenter';
 
 export const ReportsView: React.FC = () => {
   const { 
@@ -49,7 +51,7 @@ export const ReportsView: React.FC = () => {
   } = useClinic();
 
   const isAdmin = currentUser.role === 'Admin';
-  const [activeReportTab, setActiveReportTab] = useState<'batch_pricing' | 'batch_stock' | 'sales' | 'profit' | 'opening_stock' | 'expiry' | 'valuation' | 'price_history'>('batch_pricing');
+  const [activeReportTab, setActiveReportTab] = useState<'batch_pricing' | 'batch_stock' | 'sales' | 'profit' | 'opening_stock' | 'expiry' | 'valuation' | 'price_history' | 'branch_sync'>('batch_pricing');
   const [filterLocationId, setFilterLocationId] = useState<string>(() => {
     return currentUser.role === 'Admin' ? selectedLocationId : (currentUser.locationId || 'LOC-HOS');
   });
@@ -916,6 +918,21 @@ export const ReportsView: React.FC = () => {
           <span>Product Price History</span>
           <span className="text-[10px] bg-slate-100 text-slate-700 px-1.5 py-0.2 rounded font-mono font-bold">
             {priceHistory.length}
+          </span>
+        </button>
+
+        <button
+          onClick={() => setActiveReportTab('branch_sync')}
+          className={`pb-3 px-3.5 font-semibold flex items-center gap-1.5 border-b-2 whitespace-nowrap transition-colors ${
+            activeReportTab === 'branch_sync'
+              ? 'border-teal-600 text-teal-900 bg-teal-50/50 rounded-t-lg font-bold'
+              : 'border-transparent text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <ArrowRightLeft className="w-4 h-4 text-teal-700" />
+          <span>Branch Sync &amp; Table Import</span>
+          <span className="text-[10px] bg-teal-600 text-white px-2 py-0.5 rounded-full font-bold">
+            New
           </span>
         </button>
       </div>
@@ -2525,6 +2542,11 @@ export const ReportsView: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* TAB: MULTI-BRANCH SYNC & TABLE STRUCTURE IMPORT */}
+      {activeReportTab === 'branch_sync' && (
+        <BranchDataSyncCenter />
       )}
 
     </div>

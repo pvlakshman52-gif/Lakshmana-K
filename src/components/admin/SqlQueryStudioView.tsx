@@ -50,7 +50,7 @@ const PRESET_QUERIES = [
     id: 'all_databases',
     title: 'List All Databases',
     icon: Database,
-    description: 'Fetch all databases installed on DESKTOP-JN61NSF\\SQLEXPRESS',
+    description: 'Fetch all databases installed on the connected SQL Server instance',
     sql: 'SELECT database_id, name, state_desc, recovery_model_desc, create_date FROM sys.databases ORDER BY name ASC;'
   },
   {
@@ -256,7 +256,7 @@ export const SqlQueryStudioView: React.FC<SqlQueryStudioViewProps> = ({ onNaviga
           <div className="px-3 py-1.5 bg-slate-800/80 border border-slate-700 rounded-xl flex items-center gap-1.5 font-mono">
             <Server className="w-3.5 h-3.5 text-teal-400" />
             <span className="text-slate-400">Server:</span>
-            <span className="font-bold text-white">{status.server || 'DESKTOP-JN61NSF\\SQLEXPRESS'}</span>
+            <span className="font-bold text-white">{status.server || '(local)\\SQLEXPRESS'}</span>
           </div>
 
           <div className="px-3 py-1.5 bg-slate-800/80 border border-slate-700 rounded-xl flex items-center gap-1.5 font-mono">
@@ -595,7 +595,7 @@ export const SqlQueryStudioView: React.FC<SqlQueryStudioViewProps> = ({ onNaviga
                   onChange={e => setConnStringInput(e.target.value)}
                   rows={4}
                   className="w-full p-3 font-mono text-xs bg-slate-50 border border-slate-300 rounded-xl focus:outline-teal-600"
-                  placeholder="Data Source=DESKTOP-JN61NSF\SQLEXPRESS;Integrated Security=True;..."
+                  placeholder="Data Source=(local)\SQLEXPRESS;Integrated Security=True;..."
                 />
               </div>
 
@@ -603,7 +603,7 @@ export const SqlQueryStudioView: React.FC<SqlQueryStudioViewProps> = ({ onNaviga
               {connStringInput && (
                 <div className="p-3 bg-slate-100 rounded-xl border border-slate-200 space-y-1 font-mono text-[11px]">
                   <div className="font-bold text-slate-800 font-sans text-xs mb-1">Parsed Parameters:</div>
-                  <div>Server: <strong className="text-slate-900">{parseSqlServerConnectionString(connStringInput).server || 'DESKTOP-JN61NSF\\SQLEXPRESS'}</strong></div>
+                  <div>Server: <strong className="text-slate-900">{parseSqlServerConnectionString(connStringInput).server || status.server || '(local)\\SQLEXPRESS'}</strong></div>
                   <div>Database: <strong className="text-teal-900">{parseSqlServerConnectionString(connStringInput).database || 'MediClinic_ERP'}</strong></div>
                   <div>Auth: <strong className="text-slate-900">{parseSqlServerConnectionString(connStringInput).authType || 'WINDOWS_AUTH'}</strong></div>
                 </div>

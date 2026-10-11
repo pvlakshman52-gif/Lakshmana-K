@@ -1,0 +1,35 @@
+<service>
+  <id>MediClinicSqlBridge</id>
+  <name>MediClinicSqlBridge</name>
+  <displayName>MediClinic ERP SQL Bridge</displayName>
+  <description>MediClinic Commerce ERP persistent local Microsoft SQL Server synchronization bridge service running on port 5001</description>
+  <executable>node.exe</executable>
+  <arguments>local-sql-bridge.js</arguments>
+  <workingdirectory>C:\Program Files\MediClinic\SQLBridge</workingdirectory>
+  
+  <!-- Canonical writable log directory for Windows services -->
+  <logpath>C:\ProgramData\MediClinic\Logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+
+  <!-- Automatic failure recovery: restart after 10s, 20s, 60s -->
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="20 sec"/>
+  <onfailure action="restart" delay="60 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
+  <!-- Start automatically on Windows boot before user login -->
+  <startmode>Automatic</startmode>
+  <priority>Normal</priority>
+  <stoptimeout>15 sec</stoptimeout>
+
+  <!-- Default environment parameters -->
+  <env name="SQL_BRIDGE_PORT" value="5001"/>
+  <env name="SQL_SERVER_HOST" value="localhost\SQLEXPRESS"/>
+  <env name="SQL_SERVER_DB" value="MediClinic_ERP"/>
+  <env name="SQL_AUTH_TYPE" value="WINDOWS_AUTH"/>
+  <env name="SQL_TRUSTED_CONNECTION" value="true"/>
+  <env name="SQL_LOG_DIR" value="C:\ProgramData\MediClinic\Logs"/>
+</service>

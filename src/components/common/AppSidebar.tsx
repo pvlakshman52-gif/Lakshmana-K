@@ -29,7 +29,7 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
   onOpenPwaSync
 }) => {
   const { currentUser } = useClinic();
-  const isAdmin = currentUser.role === 'Admin';
+  const isAdmin = currentUser?.role === 'Admin';
 
   // Filter groups based on admin privileges
   const visibleGroups = NAVIGATION_GROUPS.filter(g => !g.adminOnly || isAdmin);

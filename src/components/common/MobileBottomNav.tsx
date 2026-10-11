@@ -41,8 +41,8 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
 
   // Active home deliveries count
   const activeDeliveriesCount = onlineOrders.filter(o => {
-    if (currentUser.role !== 'Admin' && o.locationId !== currentUser.locationId) return false;
-    if (currentUser.role === 'Admin' && selectedLocationId !== 'ALL' && o.locationId !== selectedLocationId) return false;
+    if (currentUser?.role !== 'Admin' && o.locationId !== currentUser?.locationId) return false;
+    if (currentUser?.role === 'Admin' && selectedLocationId !== 'ALL' && o.locationId !== selectedLocationId) return false;
     return o.status === 'Pending' || o.status === 'Packed' || o.status === 'Shipped';
   }).length;
 
@@ -295,7 +295,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
                 </div>
               </button>
 
-              {currentUser.role === 'Admin' && (
+              {currentUser?.role === 'Admin' && (
                 <button
                   onClick={() => handleSelectTab('go-live')}
                   className={`p-3 rounded-xl border text-left flex items-start gap-2.5 transition-all ${
@@ -314,7 +314,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
                 </button>
               )}
 
-              {currentUser.role === 'Admin' && onOpenSqlServer && (
+              {currentUser?.role === 'Admin' && onOpenSqlServer && (
                 <button
                   onClick={() => {
                     setIsMoreMenuOpen(false);

@@ -293,6 +293,28 @@ export const NAVIGATION_GROUPS: NavGroup[] = [
         icon: Receipt
       },
       {
+        id: 'rep-branch-sync',
+        title: 'Branch Data Sync & Import',
+        subtitle: 'Import / export open stock & sales totals (Today, 7D, 15D, Custom Range)',
+        route: 'branch-sync',
+        icon: ArrowRightLeft,
+        badge: 'Sync'
+      },
+      {
+        id: 'rep-consolidated',
+        title: 'Consolidated Sales',
+        subtitle: 'Multi-branch revenue comparisons for Hospete & Hubballi',
+        route: 'consolidated-sales',
+        icon: BarChart3
+      },
+      {
+        id: 'rep-email-sync',
+        title: 'Email Reports & Sync',
+        subtitle: 'Automated email dispatch of sales Excel & zip bundles',
+        route: 'email-sync',
+        icon: FileSpreadsheet
+      },
+      {
         id: 'rep-valuation',
         title: 'Inventory Valuation',
         subtitle: 'Stock balances evaluated at Cost Price and Selling Price',
@@ -406,9 +428,17 @@ export const NAVIGATION_GROUPS: NavGroup[] = [
       {
         id: 'setup-sql-studio',
         title: 'Live SQL Query Studio',
-        subtitle: 'Execute any query & fetch data directly from DESKTOP-JN61NSF\\SQLEXPRESS',
+        subtitle: 'Execute any query & fetch data directly from your local SQL Server instance',
         route: 'sql-studio',
         icon: Terminal,
+        adminOnly: true
+      },
+      {
+        id: 'setup-ui-deployment',
+        title: 'UI Deployment & Build Package',
+        subtitle: 'Download compiled frontend UI bundles (.zip), IIS web.config & NGINX configs',
+        route: 'ui-deployment',
+        icon: Package,
         adminOnly: true
       }
     ]
@@ -446,6 +476,13 @@ export function getBreadcrumbTrail(currentTab: string): { groupTitle: string; it
       return { groupTitle: 'Operations', itemTitle: 'Patient Delivery Pipeline' };
     case 'reports':
       return { groupTitle: 'Reports', itemTitle: 'Sales, Stock & Valuation Reports' };
+    case 'branch-sync':
+    case 'branch-import':
+      return { groupTitle: 'Reports', itemTitle: 'Branch Data Sync & Table Structure Import' };
+    case 'consolidated-sales':
+      return { groupTitle: 'Reports', itemTitle: 'Multi-Branch Consolidated Sales' };
+    case 'email-sync':
+      return { groupTitle: 'Reports', itemTitle: 'Email Reports & Offline Sync' };
     case 'store':
       return { groupTitle: 'Online Store', itemTitle: 'Patient Online Storefront' };
     case 'go-live':
@@ -454,6 +491,8 @@ export function getBreadcrumbTrail(currentTab: string): { groupTitle: string; it
       return { groupTitle: 'Setup & Tools', itemTitle: 'PWA & Offline Sync Management' };
     case 'sql-studio':
       return { groupTitle: 'Setup & Tools', itemTitle: 'Live SQL Query Studio & Data Fetch' };
+    case 'ui-deployment':
+      return { groupTitle: 'Setup & Tools', itemTitle: 'UI Deployment & Build Package' };
     default:
       return { groupTitle: 'MediClinic ERP', itemTitle: currentTab };
   }

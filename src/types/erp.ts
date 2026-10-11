@@ -238,6 +238,8 @@ export interface StockMovementLedger {
 // Sales Tables
 export interface SalesDetail {
   saleDetailId: string;
+  detailId?: string;
+  globalSaleItemId?: string;
   saleId: string;
   batchId: string;
   productId: string;
@@ -246,12 +248,16 @@ export interface SalesDetail {
   quantity: number;
   rate: number;
   amount: number;
+  total?: number;
   costPrice: number;
   profit: number;
+  isUnverified?: boolean;
 }
 
 export interface SalesHeader {
   saleId: string;
+  globalSaleId?: string;
+  sourceBranchCode?: string;
   invoiceNo: string; // e.g. "HOS-000001", "HUB-000001"
   locationId: string;
   customerId: string;
@@ -268,6 +274,7 @@ export interface SalesHeader {
   createdBy: string;
   createdDate: string;
   details: SalesDetail[];
+  syncStatus?: 'SyncedSQL' | 'OfflineSaved';
 }
 
 export interface CourierSettings {

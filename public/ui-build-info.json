@@ -1,0 +1,242 @@
+{
+  "status": "SUCCESS",
+  "buildTimestamp": "2026-10-10 08:30:34 UTC",
+  "buildTimestampLocal": "2026-10-10 08:30:34 AM",
+  "version": "v2.8.2-prod",
+  "zipDownloadUrl": "/mediclinic-ui-build.zip",
+  "zipSizeBytes": 19264101,
+  "zipSizeFormatted": "18.37 MB",
+  "uncompressedSizeBytes": 21844647,
+  "uncompressedSizeFormatted": "20.83 MB",
+  "fileCount": 29,
+  "files": [
+    {
+      "name": "Install-MediClinic-ERP.bat",
+      "category": "Windows Installer (.bat)",
+      "sizeBytes": 2943,
+      "sizeFormatted": "2.9 KB"
+    },
+    {
+      "name": "MediClinic-ERP-Setup.bat",
+      "category": "Windows Installer (.bat)",
+      "sizeBytes": 1380,
+      "sizeFormatted": "1.3 KB"
+    },
+    {
+      "name": "MediClinic-ERP-Setup.ps1",
+      "category": "PowerShell Engine (.ps1)",
+      "sizeBytes": 38097,
+      "sizeFormatted": "37.2 KB"
+    },
+    {
+      "name": "MediClinic-ERP.url",
+      "category": "Asset",
+      "sizeBytes": 176,
+      "sizeFormatted": "176 B"
+    },
+    {
+      "name": "MediClinic-Setup.iss",
+      "category": "Inno Setup Script (.iss)",
+      "sizeBytes": 1789,
+      "sizeFormatted": "1.7 KB"
+    },
+    {
+      "name": "MediClinicSqlBridge.xml",
+      "category": "Service Wrapper Config",
+      "sizeBytes": 1456,
+      "sizeFormatted": "1.4 KB"
+    },
+    {
+      "name": "PrintReceiptModal.tsx",
+      "category": "Asset",
+      "sizeBytes": 14705,
+      "sizeFormatted": "14.4 KB"
+    },
+    {
+      "name": "PrintReceiptModal.txt",
+      "category": "Asset",
+      "sizeBytes": 14705,
+      "sizeFormatted": "14.4 KB"
+    },
+    {
+      "name": "apple-touch-icon.png",
+      "category": "Icon / Graphic",
+      "sizeBytes": 2570,
+      "sizeFormatted": "2.5 KB"
+    },
+    {
+      "name": "favicon.ico",
+      "category": "Icon / Graphic",
+      "sizeBytes": 979,
+      "sizeFormatted": "979 B"
+    },
+    {
+      "name": "icon.svg",
+      "category": "Icon / Graphic",
+      "sizeBytes": 622,
+      "sizeFormatted": "622 B"
+    },
+    {
+      "name": "index.html",
+      "category": "HTML Entry",
+      "sizeBytes": 1957,
+      "sizeFormatted": "1.9 KB"
+    },
+    {
+      "name": "local-sql-bridge.js",
+      "category": "SQL Bridge Service",
+      "sizeBytes": 24643,
+      "sizeFormatted": "24.1 KB"
+    },
+    {
+      "name": "manifest.json",
+      "category": "PWA Manifest",
+      "sizeBytes": 831,
+      "sizeFormatted": "831 B"
+    },
+    {
+      "name": "manifest.webmanifest",
+      "category": "PWA Manifest",
+      "sizeBytes": 587,
+      "sizeFormatted": "587 B"
+    },
+    {
+      "name": "mediclinic-ui-build.zip",
+      "category": "Asset",
+      "sizeBytes": 18553774,
+      "sizeFormatted": "17.69 MB"
+    },
+    {
+      "name": "nginx.conf",
+      "category": "Asset",
+      "sizeBytes": 2199,
+      "sizeFormatted": "2.1 KB"
+    },
+    {
+      "name": "pwa-192x192.png",
+      "category": "Icon / Graphic",
+      "sizeBytes": 2692,
+      "sizeFormatted": "2.6 KB"
+    },
+    {
+      "name": "pwa-512x512.png",
+      "category": "Icon / Graphic",
+      "sizeBytes": 9141,
+      "sizeFormatted": "8.9 KB"
+    },
+    {
+      "name": "pwa-maskable-512x512.png",
+      "category": "Icon / Graphic",
+      "sizeBytes": 6580,
+      "sizeFormatted": "6.4 KB"
+    },
+    {
+      "name": "repair-service.ps1",
+      "category": "PowerShell Engine (.ps1)",
+      "sizeBytes": 15300,
+      "sizeFormatted": "14.9 KB"
+    },
+    {
+      "name": "run-ui-locally.bat",
+      "category": "Windows Installer (.bat)",
+      "sizeBytes": 1005,
+      "sizeFormatted": "1005 B"
+    },
+    {
+      "name": "sw.js",
+      "category": "JavaScript Bundle",
+      "sizeBytes": 4914,
+      "sizeFormatted": "4.8 KB"
+    },
+    {
+      "name": "ui-build-info.json",
+      "category": "PWA Manifest",
+      "sizeBytes": 6298,
+      "sizeFormatted": "6.2 KB"
+    },
+    {
+      "name": "web.config",
+      "category": "IIS Configuration",
+      "sizeBytes": 2266,
+      "sizeFormatted": "2.2 KB"
+    },
+    {
+      "name": "workbox-afac4cd2.js",
+      "category": "JavaScript Bundle",
+      "sizeBytes": 174524,
+      "sizeFormatted": "170.4 KB"
+    },
+    {
+      "name": "assets/index-CIctDCgG.css",
+      "category": "CSS Stylesheet",
+      "sizeBytes": 111649,
+      "sizeFormatted": "109.0 KB"
+    },
+    {
+      "name": "assets/index-D2m3TJch.js",
+      "category": "JavaScript Bundle",
+      "sizeBytes": 2841212,
+      "sizeFormatted": "2.71 MB"
+    },
+    {
+      "name": "assets/workbox-window.prod.es5-Bd17z0YL.js",
+      "category": "JavaScript Bundle",
+      "sizeBytes": 5653,
+      "sizeFormatted": "5.5 KB"
+    }
+  ],
+  "pipeline": {
+    "developerSide": [
+      {
+        "step": "AI Studio",
+        "desc": "Cloud development and feature customization"
+      },
+      {
+        "step": "Build",
+        "desc": "Vite 8 production compilation with zero errors"
+      },
+      {
+        "step": "mediclinic-ui-build.zip",
+        "desc": "Complete frontend bundle with pre-configured IIS web.config and bridge scripts"
+      }
+    ],
+    "customerSide": [
+      {
+        "step": "SQL Server",
+        "desc": "Local or network Microsoft SQL Server instance (dynamically detected)"
+      },
+      {
+        "step": "MediClinic-ERP-Setup.exe / .bat",
+        "desc": "Automated 1-click Windows elevated installer engine"
+      },
+      {
+        "step": "Automatic dependency check",
+        "desc": "Checks and auto-provisions Node.js, IIS, URL Rewrite 2.1, ARR 3.0"
+      },
+      {
+        "step": "IIS + Rewrite + ARR",
+        "desc": "Enables IIS features, installs rewrite modules, enables ARR proxy"
+      },
+      {
+        "step": "SQL Bridge Windows Service",
+        "desc": "Installs native MediClinicSqlBridge Windows Service (port 5001, auto boot startup, auto-recovery)"
+      },
+      {
+        "step": "Extract UI ZIP",
+        "desc": "Extracts production UI bundle directly to C:\\inetpub\\wwwroot\\mediclinic"
+      },
+      {
+        "step": "Configure API",
+        "desc": "Configures reverse proxy: /api/* -> http://localhost:5001/api/*"
+      },
+      {
+        "step": "Health checks",
+        "desc": "Probes port 5001, SQL query connection, IIS port 80, reverse proxy"
+      },
+      {
+        "step": "Go Live",
+        "desc": "Creates Desktop shortcuts, opens browser to http://localhost/mediclinic"
+      }
+    ]
+  }
+}

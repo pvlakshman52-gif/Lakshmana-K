@@ -5,10 +5,12 @@ import { DatabaseConnectionInspectorModal } from './DatabaseConnectionInspectorM
 
 interface DatabaseConnectionBadgeProps {
   onOpenSqlServer?: (tab?: 'schema' | 'connection' | 'migrations' | 'notifications' | 'sync' | 'cloud') => void;
+  onNavigate?: (tab: string) => void;
 }
 
 export const DatabaseConnectionBadge: React.FC<DatabaseConnectionBadgeProps> = ({
-  onOpenSqlServer
+  onOpenSqlServer,
+  onNavigate
 }) => {
   const [status, setStatus] = useState<SqlServerStatus>(() => localSqlServerService.getStatus());
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -65,6 +67,7 @@ export const DatabaseConnectionBadge: React.FC<DatabaseConnectionBadgeProps> = (
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         onOpenSqlServerManager={onOpenSqlServer}
+        onNavigate={onNavigate}
       />
     </>
   );
